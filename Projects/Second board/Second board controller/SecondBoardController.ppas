@@ -113,14 +113,12 @@ begin
   end;
 end;
 
-procedure SevenSegmentInterrupt;
+procedure DisplayDotsInterrupt;
 begin
   if INTCON.T0IE=False then Exit;
 
   if INTCON.T0IF then
   begin
-    // *** Seven segment displays ***
-
     case DisplayColumnIndex of
       0:
       begin
@@ -170,7 +168,7 @@ end;
 procedure interrupt;
 begin
   I2CInterrupt;
-  SevenSegmentInterrupt;
+  DisplayDotsInterrupt;
   Inc(InterruptCount);
 end;
 
