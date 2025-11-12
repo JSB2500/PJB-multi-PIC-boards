@@ -1,0 +1,27 @@
+[DeviceName]
+Value=P16C84
+[DeviceClock]
+Value=8
+[MainUnit]
+Value=BidirectionalLEDFlasher.ppas
+[DeviceFlags]
+Count=2
+Value0=_WDT_OFF = $3FFB
+Value1=_RC_OSC = $3FFF
+[ProjectFiles]
+Count=0
+[OtherFiles]
+Count=1
+Value0=C:\PICs\Mikro Pascal\BidirectionalLEDFlasher\BidirectionalLEDFlasher.ppas
+[TabIndex]
+Value=0
+[SearchPath]
+Count=4
+Value0=E:\Program Files\Mikroelektronika\mikroPascal\Defs\
+Value1=E:\Program Files\Mikroelektronika\mikroPascal\Uses\p16\
+Value2=C:\PICs\Mikro Pascal\BidirectionalLEDFlasher\
+Value3=C:\PICs\Mikro Pascal\Library\
+Value4=C:\Program Files\Mikroelektronika\mikroPascal\Uses\p16\
+Value5=C:\PICs\Mikro Pascal\Library\
+[EEPROMinfo]
+isused=0

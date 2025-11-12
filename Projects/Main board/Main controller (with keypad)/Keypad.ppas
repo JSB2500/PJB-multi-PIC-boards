@@ -1,0 +1,1763 @@
+program Keypad;
+
+///////////////////////////////////////////////////////////////////////////////
+// PLEASE NOTE:
+//
+// When using P16F872s:
+//
+// Change "#pragma    SetPage(PAGE0, 0x0004, 0x07FF)"
+// to "#pragma    SetPage(PAGE0, 0x0004, 0x08FF)" in P16F872.mlk file in "E:\Program Files\Mikroelektronika\mikroPascal\defs\P16F872.mlk"
+// to overcome the over cautious linker "out of ROM" error.
+//
+///////////////////////////////////////////////////////////////////////////////
+// PIC connects:
+//
+// PORTA.0 to PORTA.3: Input: From keypad column. 0=Top row to 3=Bottom row.
+//
+// PORTB.0: Output: Not used.
+// PORTB.1: Output: Not used.
+// PORTB.2: Output: Not used.
+// PORTB.3: Output: Not used.
+// PORTB.4: Output: Not used.
+// PORTB.5: Output: First keypad column.
+// PORTB.6: Output: Second keypad column.
+// PORTB.7: Output: Third keypad column.
+//
+// PORTC.0: Output: Not used.
+// PORTC.1: Output: Not used.
+// PORTC.2: Output: Not used.
+// PORTC.3: I/O: I2C clock.
+// PORTC.4: I/O: I2C data.
+// PORTC.5: Output: Busy - green light.
+// PORTC.6: Output: Busy - red light.
+// PORTC.7: Output: Enable signal for other devices (e.g. To MCLR of other PICs).
+//
+///////////////////////////////////////////////////////////////////////////////
+
+uses
+  UGeneral, UI2C;
+
+const
+  SystemSpeechChipI2CAddress=$80;
+  UserSpeechChipI2CAddress=$82;
+  I2C_ControllerAddress=$24;
+  SevenSegmentI2CAddress=$28;
+
+var
+  AutoHelpEnabled:Boolean;
+
+///////////////////////////////////////////////////////////////////////////////
+// Message indices:
+
+const
+  MessageIndex_FirstCommand=0;
+  MessageIndex_LastCommand=79;
+  MessageIndex_AutoHelpDisabled=80;
+  MessageIndex_AutoHelpEnabled=81;
+  MessageIndex_Logon=82;
+  MessageIndex_Logoff=83;
+  MessageIndex_InvalidLogon=84;
+  MessageIndex_InvalidCommand=85;
+  MessageIndex_InvalidPosition=86;
+  MessageIndex_SystemRecordingsAreLocked=87;
+  MessageIndex_InvalidPassNumber=88;
+  MessageIndex_InvalidSource=89;
+  //
+  MessageIndex_LastSystemMessage=89;
+  
+  SystemMusicPosition_Start=360;
+  //
+  SystemMusicPosition_Logon_Start=360; // "W&G Theme".
+  SystemMusicPosition_Logon_End=377;
+  //
+  SystemMusicPosition_Logoff_Start=378; // "Simpson's 0".
+  SystemMusicPosition_Logoff_End=389;
+  //
+  SystemMusicPosition_InvalidLogon_Start=390; // "Alarm".
+  SystemMusicPosition_InvalidLogon_End=399;
+
+///////////////////////////////////////////////////////////////////////////////
+// Base functionality:
+
+procedure SetBusyLightOff;
+begin
+  PORTC.5:=0; // Busy - green light.
+  PORTC.6:=0; // Busy - red light.
+end;
+
+procedure SetNotBusy;
+begin
+  PORTC.5:=1; // Busy - green light.
+  PORTC.6:=0; // Busy - red light.
+end;
+
+procedure SetBusy;
+begin
+  PORTC.5:=0; // Busy - green light.
+  PORTC.6:=1; // Busy - red light.
+end;
+
+procedure SetWaiting;
+begin
+  PORTC.5:=1; // Busy - green light.
+  PORTC.6:=1; // Busy - red light.
+end;
+
+procedure DisplayError;
+// Does not preserve light status!
+var
+  FlashIndex:Byte;
+begin
+  for FlashIndex:=0 to 4 do
+  begin
+    SetBusy;
+    DelayMS(300);
+    SetBusyLightOff;
+    DelayMS(300);
+  end;
+  SetNotBusy;
+end;
+
+procedure DisplayDecimalValue(Value:Word);
+begin
+  I2C_Master_StartWrite(SevenSegmentI2CAddress);
+  I2C_Master_SendCommandWithWordParameter($02,Value);
+  I2C_Master_Stop;
+end;
+
+procedure DisplayHexadecimalValue(Value:Word);
+begin
+  I2C_Master_StartWrite(SevenSegmentI2CAddress);
+  I2C_Master_SendCommandWithWordParameter($04,Value);
+  I2C_Master_Stop;
+end;
+
+///////////////////////////////////////////////////////////////////////////////
+
+const
+  KeyBufferSize=20;
+  DefaultPassNumber=1234;
+
+const
+  GetValueResult_None=0;
+  GetValueResult_Value=1;
+  GetValueResult_Cancel=2;
+  GetValueResult_LineBlank=3;
+
+var
+  Interrupt_KeypadColumnIndex:Byte;
+  I2CCommand:Byte; // Must be preserved between instructions to control data read from us.
+  MandatoryByte:Byte;
+  PassNumber:Word;
+  KeyColumns:Array[0..2] of Byte;
+  KeyBufferWriteIndex,KeyBufferWriteCount,KeyBufferReadIndex:Byte;
+  KeyBuffer:Array[0..KeyBufferSize-1] of Byte;
+  Interrupt_MessageIndex:Byte;
+  Locked:Boolean;
+  LastCommand:Word;
+
+var
+  InputParameter_Address:Byte;
+  InputParameter_Position:Word;
+
+(*!!!
+procedure I2CInterrupt;
+var
+  MessageIndex:Byte;
+begin
+  // Prevent SSPIF being handled inadvertently if PIE1.SSPIE=False and the interrupt handler is called by another
+  // source (e.g. a timer) when SSPIF=True as it often is during I2C master mode transactions.
+  if PIE1.SSPIE=False then Exit;
+
+  if PIR1.SSPIF then
+  begin
+    if (SSPSTAT.D_A=0) then // Command.
+    begin
+      if SSPSTAT.R_W then
+      begin
+!!!Changed
+        case I2CCommand of
+          $01: I2C_Slave_SendByte(PORTC.7);
+        end;
+      end
+      else
+      begin
+        if SSPSTAT.BF then
+        begin
+          MandatoryByte:=SSPBUF; // Slave address or zero for general call. Make sure this is not optimized out!
+          SSPSTAT.SSPOV:=False;
+
+          I2CCommand:=I2C_Slave_ReceiveByte;
+
+          case I2CCommand of
+            $00:
+            begin
+              MessageIndex:=I2C_Slave_ReceiveByte;
+
+!!!Changed - Use new speech chip.
+              PortB.0:=MessageIndex.0;
+              PortB.1:=MessageIndex.1;
+              PortB.2:=MessageIndex.2;
+              PortB.3:=MessageIndex.3;
+
+              PORTB.4:=1; // Set start speech flag.
+            //!!! This is too long for an interrupt delay!
+              Delay_MS(1); // Give speech time to start.
+              PORTB.4:=0; // Clear start speech flag.
+            end;
+
+            $01: begin end; // Read speech playing flag.
+          end;
+        end;
+      end;
+    end;
+
+    PIR1.SSPIF:=False;
+  end;
+end;
+*)
+
+procedure Interrupt_AddKey(Value:Byte);
+// Value is key position in columns then rows 0..11.
+begin
+  // Deliberately lose key if buffer is full.
+  if KeyBufferWriteCount=KeyBufferSize then Exit;
+  
+  // Translate key positions to key values.
+  case Value of
+    10: Value:=0;
+    11: begin end
+    else Inc(Value);
+  end;
+
+  KeyBuffer[KeyBufferWriteIndex]:=Value;
+  Inc(KeyBufferWriteIndex);
+  Inc(KeyBufferWriteCount);
+  if KeyBufferWriteIndex=KeyBufferSize then
+    KeyBufferWriteIndex:=0;
+end;
+
+function IsKeyAvailable:Boolean;
+begin
+  Result:=-1;
+
+  // Disable key interrupts whilst using KeyBuffer.
+  PIE1.TMR1IE:=False;
+
+  Result:=(KeyBufferWriteCount<>0);
+
+  PIE1.TMR1IE:=True;
+end;
+
+function GetKey:Byte;
+begin
+  Result:=-1;
+
+  // Disable key interrupts whilst using KeyBuffer.
+  PIE1.TMR1IE:=False;
+
+  if KeyBufferWriteCount<>0 then
+  begin
+    Result:=KeyBuffer[KeyBufferReadIndex];
+    Inc(KeyBufferReadIndex);
+    if KeyBufferReadIndex=KeyBufferSize then
+      KeyBufferReadIndex:=0;
+    Dec(KeyBufferWriteCount);
+  end;
+
+  PIE1.TMR1IE:=True;
+end;
+
+procedure ClearKeyBuffer;
+begin
+  while IsKeyAvailable do GetKey;
+end;
+
+procedure KeypadInterrupt;
+var
+  NewKeyColumn,NewKeys:Byte;
+begin
+  if PIR1.TMR1IE=False then Exit;
+
+  if PIR1.TMR1IF then
+  begin
+    NewKeyColumn:=PORTA and $0F;
+
+    // The 'Byte' type cast is a workaround for a compiler expression evaluator bug.
+    NewKeys:=NewKeyColumn and not Byte(KeyColumns[Interrupt_KeypadColumnIndex]);
+
+    if NewKeys.0 then Interrupt_AddKey(0+Interrupt_KeypadColumnIndex);
+    if NewKeys.1 then Interrupt_AddKey(3+Interrupt_KeypadColumnIndex);
+    if NewKeys.2 then Interrupt_AddKey(6+Interrupt_KeypadColumnIndex);
+    if NewKeys.3 then Interrupt_AddKey(9+Interrupt_KeypadColumnIndex);
+
+    // Set next column. Do this now rather than immediately before measuring, to give the signals time to settle.
+    case Interrupt_KeypadColumnIndex of
+      0:
+      begin
+        PORTB.5:=0;
+        PORTB.6:=1;
+        PORTB.7:=0;
+      end;
+
+      1:
+      begin
+        PORTB.5:=0;
+        PORTB.6:=0;
+        PORTB.7:=1;
+      end;
+
+      2:
+      begin
+        PORTB.5:=1;
+        PORTB.6:=0;
+        PORTB.7:=0;
+      end;
+    end;
+
+    KeyColumns[Interrupt_KeypadColumnIndex]:=NewKeyColumn;
+
+    Inc(Interrupt_KeypadColumnIndex);
+    if Interrupt_KeypadColumnIndex=3 then
+      Interrupt_KeypadColumnIndex:=0;
+
+    PIR1.TMR1IF:=0;
+  end;
+end;
+
+procedure interrupt;
+begin
+// I2CInterrupt;
+  KeypadInterrupt;
+end;
+
+function GetValue(var Value:Word):Word;
+var
+  Key:Byte;
+  DigitCount:Integer;
+begin
+  DigitCount:=0;
+  Value:=0;
+  Result:=GetValueResult_None;
+
+  while True do
+  begin
+    repeat
+      Key:=GetKey;
+    until Key<>-1;
+
+    case Key of
+      10: // Cancel.
+      begin
+        if DigitCount=0 then
+        begin
+          Result:=GetValueResult_Cancel;
+          Exit;
+        end;
+
+        DigitCount:=0;
+        Value:=0;
+      end;
+      
+      11: // Enter.
+      begin
+        if (DigitCount=0) then
+        begin
+          Result:=GetValueResult_LineBlank;
+          Exit;
+        end;
+
+        Result:=GetValueResult_Value;
+        Exit;
+      end
+      
+      else
+      begin
+        Value:=10*Value+Key;
+        Inc(DigitCount);
+      end;
+    end;
+  end;
+end;
+
+function GetCommandWithBusy(var Value:Word):Boolean;
+var
+  GetValueResult:Byte;
+begin
+  SetNotBusy;
+  GetValueResult:=GetValue(Value);
+  SetBusy;
+  
+  Result:=GetValueResult;
+end;
+
+function GetParameterWithWaitAndBusy(var Value:Word):Boolean;
+// Returns True if Value is valid.
+var
+  GetValueResult:Byte;
+begin
+  SetWaiting;
+  repeat
+    GetValueResult:=GetValue(Value);
+  until (GetValueResult<>GetValueResult_LineBlank);
+  SetBusy;
+  
+  Result:=(GetValueResult=GetValueResult_Value);
+end;
+
+///////////////////////////////////////////////////////////////////////////////
+// Speech chip:
+
+// Note: The sample rate of 4 kHz gives upacceptably low sound quality and is not worth considering.
+//       A sample rate of 8 kHz (giving 512 seconds total time) DOES give acceptable sound quality.
+
+const
+  SystemSpeechChip_RecordFromMicrophone_CFG0=%1100010001000101; // $C405.
+  SystemSpeechChip_RecordFromMicrophone_CFG1=%0100000101000000; // $4140.
+  SystemSpeechChip_RecordFromAuxIn_CFG0=%0010001001000100; // $C204 or 49668.
+  SystemSpeechChip_RecordFromAuxIn_CFG1=%0100000101000000; // $4140 or 16704.
+  SystemSpeechChip_Play_CFG0=%1100010101000100; // $C544.
+  SystemSpeechChip_Play_CFG1=%0100000111010001; // $41D1.
+  SystemSpeechChip_AnalogueInToSpeaker_CFG0=%1100010101100100;
+  SystemSpeechChip_AnalogueInToSpeaker_CFG1=%0000000000000011;
+  //
+  UserSpeechChip_RecordFromAuxIn_CFG0=%0011101000100001;
+  UserSpeechChip_RecordFromAuxIn_CFG1=%0000000101000001;
+  UserSpeechChip_RecordFromMicrophone_CFG0=%1100010000000101; // $C405.
+  UserSpeechChip_RecordFromMicrophone_CFG1=%0100000101000000; // $4140.
+  UserSpeechChip_PlayToAnalogueOut_CFG0=%0010010011011001;
+  UserSpeechChip_PlayToAnalogueOut_CFG1=%0000000111010001;
+  UserSpeechChip_PlayToSpeaker_CFG0=%1100010000000100; // $C404.
+  UserSpeechChip_PlayToSpeaker_CFG1=%0100000111010001; // $41D1.
+
+var
+  SpeechChipVolume:Word;
+
+const
+  MaxSpeechChipVolume=8;
+
+function GetSpeechChipI2CAddress(UserSpeechChip:Boolean):Byte;
+begin
+  if UserSpeechChip then
+    Result:=UserSpeechChipI2CAddress
+  else
+    Result:=SystemSpeechChipI2CAddress;
+end;
+
+procedure SwitchSpeechChipOff(UserSpeechChip:Boolean);
+begin
+  I2C_Master_StartWrite(GetSpeechChipI2CAddress(UserSpeechChip));
+  I2C_Master_SendByte($00);
+  I2C_Master_Stop;
+end;
+
+procedure SwitchSpeechChipOn(UserSpeechChip:Boolean);
+begin
+  I2C_Master_StartWrite(GetSpeechChipI2CAddress(UserSpeechChip));
+  I2C_Master_SendByte($80);
+  I2C_Master_Stop;
+end;
+
+procedure SwitchOff;
+begin
+  SwitchSpeechChipOff(False);
+  SwitchSpeechChipOff(True);
+
+  PORTC.7:=0; // Switch off.
+end;
+
+procedure SwitchOn;
+begin
+  PORTC.7:=1; // Switch on.
+
+  SwitchSpeechChipOn(False);
+  SwitchSpeechChipOn(True);
+end;
+
+function GetSpeechChipStatus(UserSpeechChip:Boolean):Byte;
+begin
+  I2C_Master_StartRead(GetSpeechChipI2CAddress(UserSpeechChip));
+  Result:=I2C_Master_ReceiveByte(True);
+  I2C_Master_Stop;
+end;
+
+procedure WaitForSpeechChipReady(UserSpeechChip:Boolean);
+var
+  Status:Byte;
+begin
+  repeat
+    Status:=GetSpeechChipStatus(UserSpeechChip);
+  until (Status and $20)<>0;
+end;
+
+function GetSpeechChipStatusAndPosition(UserSpeechChip:Boolean;var Position:Word):Byte;
+// Position is in seconds (assuming a sampling rate of 8 kHz).
+var
+  AddressHighByte,AddressLowByte:Byte;
+  Address:Word;
+begin
+  I2C_Master_StartRead(GetSpeechChipI2CAddress(UserSpeechChip));
+  Result:=I2C_Master_ReceiveByte(False);
+  AddressHighByte:=I2C_Master_ReceiveByte(False); // Note: High byte first!
+  AddressLowByte:=I2C_Master_ReceiveByte(True);
+  Address:=(AddressHighByte shl 8)+AddressLowByte;
+  Position:=Address shr 7; // "5" gives the row index, then "2" converts to seconds with a sampling rate of 8 kHz.
+  I2C_Master_Stop;
+end;
+
+procedure SetSpeechChipConfiguration(UserSpeechChip:Boolean;CFG0,CFG1:Word);
+begin
+  I2C_Master_StartWrite(GetSpeechChipI2CAddress(UserSpeechChip));
+  I2C_Master_SendByte($82);
+  I2C_Master_SendByte(Hi(CFG0)); // Note: High byte first!
+  I2C_Master_SendByte(Lo(CFG0));
+  I2C_Master_StartWrite(GetSpeechChipI2CAddress(UserSpeechChip));
+  I2C_Master_SendByte($83);
+  I2C_Master_SendByte(Hi(CFG1)); // Note: High byte first!
+  I2C_Master_SendByte(Lo(CFG1));
+  I2C_Master_Stop;
+end;
+
+procedure SetRecordConfiguration(UserSpeechChip,RecordFromAux,Silent:Boolean);
+var
+  CFG0,CFG1:Word;
+begin
+  if RecordFromAux then
+  begin
+    CFG0:=SystemSpeechChip_RecordFromAuxIn_CFG0;
+    CFG1:=SystemSpeechChip_RecordFromAuxIn_CFG1;
+  end
+  else
+  begin
+    CFG0:=SystemSpeechChip_RecordFromMicrophone_CFG0;
+    CFG1:=SystemSpeechChip_RecordFromMicrophone_CFG1;
+  end;
+
+  if Silent then
+    CFG1.0:=1;
+
+  SetSpeechChipConfiguration(False,CFG0,CFG1);
+
+  if UserSpeechChip then
+    SetSpeechChipConfiguration(True,UserSpeechChip_RecordFromAuxIn_CFG0,UserSpeechChip_RecordFromAuxIn_CFG1);
+end;
+
+procedure SetPlayConfiguration(UserSpeechChip:Boolean);
+var
+  CFG0,CFG1,Attenuation:Word;
+begin
+  if UserSpeechChip then
+  begin
+    CFG0:=SystemSpeechChip_AnalogueInToSpeaker_CFG0;
+    CFG1:=SystemSpeechChip_AnalogueInToSpeaker_CFG1;
+  end
+  else
+  begin
+    CFG0:=SystemSpeechChip_Play_CFG0;
+    CFG1:=SystemSpeechChip_Play_CFG1;
+  end;
+
+  if SpeechChipVolume=0 then
+    CFG0.0:=1 // VLPD
+  else
+  begin
+    if SpeechChipVolume<=8 then
+      Attenuation:=8-SpeechChipVolume
+    else
+      Attenuation:=0;
+
+    CFG1.11:=Attenuation.0;
+    CFG1.12:=Attenuation.1;
+    CFG1.13:=Attenuation.2;
+  end;
+
+  SetSpeechChipConfiguration(False,CFG0,CFG1);
+
+  if UserSpeechChip then
+    SetSpeechChipConfiguration(True,UserSpeechChip_PlayToAnalogueOut_CFG0,UserSpeechChip_PlayToAnalogueOut_CFG1);
+end;
+
+procedure StopSpeechChip(UserSpeechChip:Boolean);
+begin
+  I2C_Master_StartWrite(GetSpeechChipI2CAddress(UserSpeechChip));
+  I2C_Master_SendByte($80);
+  I2C_Master_Stop;
+end;
+
+procedure RecordFromGivenPosition(UserSpeechChip:Boolean;RecordFromAux:Boolean;StartPosition,EndPosition:Word);
+var
+  Source,Position,Address:Word;
+begin
+  SetBusy;
+
+  SetRecordConfiguration(UserSpeechChip,RecordFromAux,False);
+
+  Address:=StartPosition shl 7;
+
+  I2C_Master_StartWrite(GetSpeechChipI2CAddress(UserSpeechChip));
+  I2C_Master_SendByte($91);
+  I2C_Master_SendByte(Hi(Address)); // Note: High byte first!
+  I2C_Master_SendByte(Lo(Address));
+  I2C_Master_Stop;
+
+  repeat
+    Status:=GetSpeechChipStatusAndPosition(UserSpeechChip,Position);
+
+    DisplayDecimalValue(Position);
+
+    if (Position>=EndPosition) or IsKeyAvailable then
+    begin
+      StopSpeechChip(UserSpeechChip);
+      break;
+    end;
+  until False;
+
+  WaitForSpeechChipReady(UserSpeechChip);
+
+  SetNotBusy;
+end;
+
+///////////////////////////////////////////////////////////////////////////////
+
+function GetMessageIndexForCommand(Command:Word):Integer;
+begin
+  if Command<=MessageIndex_LastSystemMessage then
+    Result:=Command+MessageIndex_FirstCommand
+  else
+    Result:=-1;
+end;
+
+function GetPositionFromMessageIndex(MessageIndex:Integer):Word;
+begin
+  Result:=MessageIndex shl 2;
+end;
+
+procedure PlaySpeech(UserSpeechChip:Boolean;StartPosition,EndPosition:Integer;StopIfKeyPressed,IsError:Boolean);
+var
+  Status:Byte;
+  Address,Position:Word;
+begin
+  WaitForSpeechChipReady(UserSpeechChip);
+
+  SetPlayConfiguration(UserSpeechChip);
+
+  Address:=StartPosition shl 7;
+
+  I2C_Master_StartWrite(GetSpeechChipI2CAddress(UserSpeechChip));
+  I2C_Master_SendByte($A9);
+  I2C_Master_SendByte(Hi(Address)); // Note: High byte first!
+  I2C_Master_SendByte(Lo(Address));
+  I2C_Master_Stop;
+
+  if IsError then
+    DisplayError;
+
+  repeat
+    Status:=GetSpeechChipStatusAndPosition(UserSpeechChip,Position);
+    if (Position>=EndPosition) or (StopIfKeyPressed and IsKeyAvailable) then StopSpeechChip(UserSpeechChip);
+  until (Status and $20)<>0;
+end;
+
+procedure SayMessage(MessageIndex:Integer;IsErrorMessage:Boolean);
+var
+  StartPosition,EndPosition,Position:Word;
+begin
+  if MessageIndex=-1 then Exit;
+
+  StartPosition:=GetPositionFromMessageIndex(MessageIndex);
+  EndPosition:=StartPosition+4;
+
+  PlaySpeech(False,StartPosition,EndPosition,False,IsErrorMessage);
+
+  DelayMS(500); // Ensure gap between messages.
+end;
+
+function ReadPassNumber:Word;
+var
+  LowByte,HighByte:Byte;
+begin
+  LowByte:=EEPROM_Read($00);
+  DelayMS(20);
+  HighByte:=EEPROM_Read($01);
+  DelayMS(20);
+
+  Result:=LowByte+(HighByte shl 8);
+
+  if Result=65535 then
+    Result:=DefaultPassNumber;
+end;
+
+procedure WritePassNumber(Value:Word);
+begin
+  EEPROM_Write($00,Lo(Value));
+  DelayMS(20);
+  EEPROM_Write($01,Hi(Value));
+  DelayMS(20);
+end;
+
+function ReadAllowRecordingOfSystemRecordings:Boolean;
+begin
+  if EEPROM_Read($02)=$FF then
+    Result:=True
+  else
+    Result:=False;
+
+  DelayMS(20);
+end;
+
+procedure DisableRecordingOfSystemRecordings;
+begin
+  EEPROM_Write($02,0);
+  DelayMS(20);
+end;
+
+procedure Initialize;
+begin
+  // Setup PA pins to digital.
+  ADCON0:=$00;
+  ADCON1:=$0F; // P18F
+
+  TRISA:=$EF;
+  PORTA:=$00;
+
+  TRISB:=$00;
+  PORTB:=$00;
+  INTCON2.RBPU:=1; // P18F - similar to OPTION_REG.7 in P16F.
+
+  TRISC:=$18; // <3:4> used for I2C.
+  PORTC:=$00;
+
+  KeyColumns[0]:=0;
+  KeyColumns[1]:=0;
+  KeyColumns[2]:=0;
+  Interrupt_KeypadColumnIndex:=0;
+  KeyBufferWriteIndex:=0;
+  KeyBufferWriteCount:=0;
+  KeyBufferReadIndex:=0;
+  I2CCommand:=-1;
+  Interrupt_MessageIndex:=-1;
+  Locked:=False;
+
+  // Not sure whether this section is necessary:
+
+  // Timer 0 is not used.
+  T0CON:=%00010111; // P18F - <5:0> similar to OPTION_REG in P16F.
+  
+  // Timer 1 creates interrupts to call the keypad routines.
+  T1CON:=$01; // Includes timer 1 prescale.
+  PIE1.TMR1IE:=1;
+
+  INTCON:=$C0; // Enable interrupts.
+
+  ///
+
+  I2C_Initialize($20,True);
+
+  PassNumber:=ReadPassNumber;
+  
+  SpeechChipVolume:=MaxSpeechChipVolume;
+  
+  AutoHelpEnabled:=True;
+end;
+
+procedure Logon;
+var
+  Command:Word;
+begin
+  SwitchOff;
+
+  repeat
+    if GetCommandWithBusy(Command)<>GetValueResult_Value then continue;
+    if (Command<>PassNumber) then
+    begin
+      PlaySpeech(False,SystemMusicPosition_InvalidLogon_Start,SystemMusicPosition_InvalidLogon_End,False,False);
+      SayMessage(MessageIndex_InvalidLogon,True);
+     end;
+  until Command=PassNumber;
+
+  SwitchOn;
+
+  SayMessage(MessageIndex_Logon,False);
+  PlaySpeech(False,SystemMusicPosition_Logon_Start,SystemMusicPosition_Logon_End,True,False);
+end;
+
+procedure Goodbye;
+begin
+  SayMessage(MessageIndex_Logoff,False);
+  PlaySpeech(False,SystemMusicPosition_Logoff_Start,SystemMusicPosition_Logoff_End,True,False);
+end;
+
+procedure Command_0_Help;
+var
+  GetValueResult:Byte;
+  Command,Value:Word;
+begin
+  Command:=0;
+  
+  repeat
+    SetWaiting;
+    GetValueResult:=GetValue(Value);
+    if GetValueResult=GetValueResult_Cancel then Exit;
+    if GetValueResult=GetValueResult_LineBlank then
+      Inc(Command)
+    else
+      Command:=Value;
+
+    SetBusy;
+    DisplayDecimalValue(Command);
+    SayMessage(GetMessageIndexForCommand(Command),False);
+    SetNotBusy;
+  until False;
+end;
+
+procedure Command_1_ToggleAutoHelp;
+begin
+  AutoHelpEnabled:=not AutoHelpEnabled;
+  
+  if AutoHelpEnabled then
+    SayMessage(MessageIndex_AutoHelpEnabled,False)
+ else
+    SayMessage(MessageIndex_AutoHelpDisabled,False);
+end;
+
+procedure Command_2_ToggleSleep;
+var
+  Parameter:Word;
+begin
+  if not GetParameterWithWaitAndBusy(Parameter) then Exit;
+
+  if Parameter=PassNumber then
+    Locked:=not Locked
+  else
+    SayMessage(MessageIndex_InvalidPassNumber,True);
+end;
+
+procedure Command_3_SpeechChip_SetVolume;
+// Set volume.
+begin
+  if not GetParameterWithWaitAndBusy(SpeechChipVolume) then Exit;
+end;
+
+procedure Command_8_SendAuxInToSpeaker;
+begin
+  SetSpeechChipConfiguration(False,SystemSpeechChip_RecordFromAuxIn_CFG0,SystemSpeechChip_RecordFromAuxIn_CFG1);
+end;
+
+procedure Command_9_ChangePassNumber;
+var
+  Parameter,NewPassNumber:Word;
+begin
+  // Get old PassNumber to validate user.
+  if not GetParameterWithWaitAndBusy(Parameter) then Exit;
+  if Parameter<>PassNumber then
+  begin
+    SayMessage(MessageIndex_InvalidPassNumber,True);
+    Exit;
+  end;
+
+  // Get new PassNumber. The new PassNumber must be greater than or equal to 1000 to distinguish it from command numbers.
+  if not GetParameterWithWaitAndBusy(Parameter) then Exit;
+  if Parameter<1000 then
+  begin
+    SayMessage(MessageIndex_InvalidPassNumber,True);
+    Exit;
+  end;
+
+  NewPassNumber:=Parameter;
+
+  // Get user to re-enter PassNumber to ensure no mistakes were made.
+  if not GetParameterWithWaitAndBusy(Parameter) then Exit;
+  if Parameter<>NewPassNumber then
+  begin
+    DisplayError;
+    Exit;
+  end;
+
+  PassNumber:=NewPassNumber;
+
+  WritePassNumber(PassNumber);
+end;
+
+procedure Command_10_SevenSegmentDisplay_SlowlyDescendingCount;
+begin
+  I2C_Master_StartWrite(SevenSegmentI2CAddress);
+  I2C_Master_SendCommandWithByteParameter($01,0);
+  I2C_Master_Stop;
+end;
+
+procedure Command_11_SevenSegmentDisplay_SlowlyAscendingCount;
+begin
+  I2C_Master_StartWrite(SevenSegmentI2CAddress);
+  I2C_Master_SendCommandWithByteParameter($01,2);
+  I2C_Master_Stop;
+end;
+
+procedure Command_12_SevenSegmentDisplay_RapidlyDescendingCount;
+begin
+  I2C_Master_StartWrite(SevenSegmentI2CAddress);
+  I2C_Master_SendCommandWithByteParameter($01,4);
+  I2C_Master_Stop;
+end;
+
+procedure Command_13_SevenSegmentDisplay_RapidlyAscendingCount;
+begin
+  I2C_Master_StartWrite(SevenSegmentI2CAddress);
+  I2C_Master_SendCommandWithByteParameter($01,6);
+  I2C_Master_Stop;
+end;
+
+procedure Command_14_SevenSegmentDisplay_LightBall;
+begin
+  I2C_Master_StartWrite(SevenSegmentI2CAddress);
+  I2C_Master_SendCommandWithByteParameter($01,3);
+  I2C_Master_Stop;
+end;
+
+procedure Command_15_SevenSegmentDisplay_VoltMeter;
+begin
+  I2C_Master_StartWrite(SevenSegmentI2CAddress);
+  I2C_Master_SendCommandWithByteParameter($01,1);
+  I2C_Master_Stop;
+end;
+
+procedure Command_16_SevenSegmentDisplay_ResetDisplay;
+begin
+  I2C_Master_StartWrite(SevenSegmentI2CAddress);
+  I2C_Master_SendByte($00);
+  I2C_Master_Stop;
+end;
+
+procedure Command_17_SevenSegmentDisplay_DimDisplay;
+var
+  Parameter:Word;
+begin
+  if not GetParameterWithWaitAndBusy(Parameter) then Exit;
+
+  I2C_Master_StartWrite(SevenSegmentI2CAddress);
+  I2C_Master_SendByte($03);
+  I2C_Master_SendByte(Byte(Parameter));
+  I2C_Master_Stop;
+end;
+
+procedure Command_18_SevenSegmentDisplay_DisplayDecimalValue;
+var
+  Parameter:Word;
+begin
+  if not GetParameterWithWaitAndBusy(Parameter) then Exit;
+  DisplayDecimalValue(Parameter);
+end;
+
+procedure Command_19_SevenSegmentDisplay_DisplayHexadecimalValue;
+var
+  Parameter:Word;
+begin
+  if not GetParameterWithWaitAndBusy(Parameter) then Exit;
+  DisplayHexadecimalValue(Parameter);
+end;
+
+procedure Command_30_SpeechChip_GetStatus;
+var
+  Status:Byte;
+begin
+  Status:=GetSpeechChipStatus(True);
+  DisplayHexadecimalValue(Status);
+end;
+
+procedure Command_31_SpeechChip_GetPosition;
+var
+  Position:Word;
+begin
+  GetSpeechChipStatusAndPosition(True,Position);
+  DisplayDecimalValue(Position);
+end;
+
+procedure Command_32_SpeechChip_SendCommand;
+var
+  Command:Byte;
+begin
+  if not GetParameterWithWaitAndBusy(Command) then Exit;
+
+  I2C_Master_StartWrite(GetSpeechChipI2CAddress(True));
+  I2C_Master_SendByte(Command);
+  I2C_Master_Stop;
+end;
+
+procedure Command_33_SpeechChip_SendCommandAndParameter;
+var
+  Command:Byte;
+  WordParameter:Word;
+begin
+  if not GetParameterWithWaitAndBusy(Command) then Exit;
+  if not GetParameterWithWaitAndBusy(WordParameter) then Exit;
+
+  I2C_Master_StartWrite(GetSpeechChipI2CAddress(True));
+  I2C_Master_SendByte(Command);
+  I2C_Master_SendByte(Hi(WordParameter)); // Note: High byte first!
+  I2C_Master_SendByte(Lo(WordParameter));
+  I2C_Master_Stop;
+
+  DisplayHexadecimalValue(WordParameter);
+end;
+
+procedure Command_34_SpeechChip_SendConfigurationWords;
+var
+  CFG0,CFG1:Word;
+begin
+  if not GetParameterWithWaitAndBusy(CFG0) then Exit;
+  DisplayHexadecimalValue(CFG0);
+
+  if not GetParameterWithWaitAndBusy(CFG1) then Exit;
+  DisplayHexadecimalValue(CFG1);
+
+  SetSpeechChipConfiguration(True,CFG0,CFG1);
+
+  SetBusy;
+  repeat until IsKeyAvailable;
+  SetNotBusy;
+end;
+
+procedure Command_35_SpeechChip_Stop;
+begin
+  StopSpeechChip(True);
+end;
+
+procedure Command_36_SpeechChip_RecordFromGivenPosition;
+var
+  Value,RecordFromAux,MinStartPosition,MaxEndPosition,StartPosition,EndPosition:Word;
+begin
+  repeat
+    if not GetParameterWithWaitAndBusy(Value) then Exit;
+    if (Value=0) or (Value=1) then break;
+    SayMessage(MessageIndex_InvalidSource,True);
+  until False;
+  RecordFromAux:=(Value=1);
+
+  MinStartPosition:=0;
+  MaxEndPosition:=511;
+
+  repeat
+    if not GetParameterWithWaitAndBusy(StartPosition) then Exit;
+    if (StartPosition>=MinStartPosition) and (StartPosition<=MaxEndPosition) then break;
+    SayMessage(MessageIndex_InvalidPosition,True);
+  until False;
+
+  repeat
+    if not GetParameterWithWaitAndBusy(EndPosition) then Exit;
+    if (EndPosition>=StartPosition) and (EndPosition<=MaxEndPosition) then break;
+    SayMessage(MessageIndex_InvalidPosition,True);
+  until False;
+
+  RecordFromGivenPosition(True,RecordFromAux,StartPosition,EndPosition);
+end;
+
+procedure Command_37_SpeechChip_PlayFromGivenPosition(RepeatLastCommand:Boolean);
+var
+  Status:Byte;
+  Position,Address:Word;
+begin
+  SetPlayConfiguration(True);
+
+  if not RepeatLastCommand then
+  begin
+    if not GetParameterWithWaitAndBusy(InputParameter_Position) then Exit;
+  end;
+
+  SetBusy;
+
+  Address:=InputParameter_Position shl 7;
+
+  I2C_Master_StartWrite(GetSpeechChipI2CAddress(True));
+  I2C_Master_SendByte($A9);
+  I2C_Master_SendByte(Hi(Address)); // Note: High byte first!
+  I2C_Master_SendByte(Lo(Address));
+  I2C_Master_Stop;
+
+  repeat
+    Status:=GetSpeechChipStatusAndPosition(True,Position);
+
+    DisplayDecimalValue(Position);
+
+    if IsKeyAvailable then
+    begin
+      StopSpeechChip(True);
+      break;
+    end;
+  until (Status and $20)<>0;
+
+  SetNotBusy;
+end;
+
+procedure Command_40_Clock_DisplayMinutesAndSeconds;
+var
+  Data00,Data01,Data02:Byte;
+  Seconds,Minutes,Hours:Word;
+begin
+  repeat
+    I2C_Master_StartWrite($D0);
+    I2C_Master_SendByte($00);
+    //
+    I2C_Master_StartRead($D0);
+    Data00:=I2C_Master_ReceiveByte(False);
+    Data01:=I2C_Master_ReceiveByte(False);
+    Data02:=I2C_Master_ReceiveByte(True);
+    Seconds:=(Data00 and $0F)+10*((Data00 and $F0) shr 4);
+    Minutes:=(Data01 and $0F)+10*((Data01 and $F0) shr 4);
+    Hours:=(Data02 and $0F)+10*((Data02 and $30) shr 4);
+    I2C_Master_Stop;
+    
+    DisplayDecimalValue(Seconds+100*Minutes);
+
+    DelayMS(50); // Reduce flicker.
+  until IsKeyAvailable;
+end;
+
+procedure Command_41_Clock_DisplayHoursAndMinutes;
+var
+  Data00,Data01,Data02:Byte;
+  Seconds,Minutes,Hours:Word;
+begin
+  repeat
+    I2C_Master_StartWrite($D0);
+    I2C_Master_SendByte($00);
+    //
+    I2C_Master_StartRead($D0);
+    Data00:=I2C_Master_ReceiveByte(False);
+    Data01:=I2C_Master_ReceiveByte(False);
+    Data02:=I2C_Master_ReceiveByte(True);
+    Seconds:=(Data00 and $0F)+10*((Data00 and $F0) shr 4);
+    Minutes:=(Data01 and $0F)+10*((Data01 and $F0) shr 4);
+    Hours:=(Data02 and $0F)+10*((Data02 and $30) shr 4);
+    I2C_Master_Stop;
+
+    DisplayDecimalValue(Minutes+100*Hours);
+
+    DelayMS(50); // Reduce flicker.
+  until IsKeyAvailable;
+end;
+
+procedure Command_42_Clock_DisplayDateAndMonth;
+var
+  Data04,Data05,Data06:Byte;
+  Date,Month,Year:Word;
+begin
+  repeat
+    I2C_Master_StartWrite($D0);
+    I2C_Master_SendByte($04);
+    //
+    I2C_Master_StartRead($D0);
+    Data04:=I2C_Master_ReceiveByte(False);
+    Data05:=I2C_Master_ReceiveByte(False);
+    Data06:=I2C_Master_ReceiveByte(True);
+    Date:=(Data04 and $0F)+10*((Data04 and $F0) shr 4);
+    Month:=(Data05 and $0F)+10*((Data05 and $F0) shr 4);
+    Year:=2000+(Data06 and $0F)+10*((Data06 and $F0) shr 4);
+    I2C_Master_Stop;
+
+    DisplayDecimalValue(Month+100*Date);
+
+    DelayMS(50); // Reduce flicker.
+  until IsKeyAvailable;
+end;
+
+procedure Command_47_Clock_SetHoursMinutesAndSeconds;
+var
+  Data00,Data01,Data02:Byte;
+  Seconds,Minutes,Hours:Word;
+begin
+  if not GetParameterWithWaitAndBusy(Hours) then Exit;
+  if (Hours>=24) then begin DisplayError; Exit; end;
+  if not GetParameterWithWaitAndBusy(Minutes) then Exit;
+  if (Minutes>=60) then begin DisplayError; Exit; end;
+  if not GetParameterWithWaitAndBusy(Seconds) then Exit;
+  if (Seconds>=60) then begin DisplayError; Exit; end;
+
+  Data00:=16*(Seconds div 10)+(Seconds mod 10);
+  Data01:=16*(Minutes div 10)+(Minutes mod 10);
+  Data02:=16*(Hours div 10)+(Hours mod 10);
+
+  I2C_Master_StartWrite($D0);
+  I2C_Master_SendByte($00);
+  I2C_Master_SendByte(Data00);
+  I2C_Master_SendByte(Data01);
+  I2C_Master_SendByte(Data02);
+  I2C_Master_Stop;
+end;
+
+procedure Command_48_Clock_SetDay;
+var
+  Data03:Byte;
+  Day:Word;
+begin
+  if not GetParameterWithWaitAndBusy(Day) then Exit;
+  if (Day=0) or (Day>7) then begin DisplayError; Exit; end;
+
+  Data03:=Day;
+
+  I2C_Master_StartWrite($D0);
+  I2C_Master_SendByte($03);
+  I2C_Master_SendByte(Data03);
+  I2C_Master_Stop;
+end;
+
+procedure Command_49_Clock_SetDateMonthAndYear;
+var
+  Data04,Data05,Data06:Byte;
+  Date,Month,Year:Word;
+begin
+  if not GetParameterWithWaitAndBusy(Date) then Exit;
+  if (Date=0) or (Date>31) then begin DisplayError; Exit; end;
+  if not GetParameterWithWaitAndBusy(Month) then Exit;
+  if (Month=0) or (Month>12) then begin DisplayError; Exit; end;
+  if not GetParameterWithWaitAndBusy(Year) then Exit;
+  if (Year<2000) or (Year>=2099) then begin DisplayError; Exit; end;
+
+  Year:=Year-2000;
+
+  Data04:=16*(Date div 10)+(Date mod 10);
+  Data05:=16*(Month div 10)+(Month mod 10);
+  Data06:=16*(Year div 10)+(Year mod 10);
+
+  I2C_Master_StartWrite($D0);
+  I2C_Master_SendByte($04);
+  I2C_Master_SendByte(Data04);
+  I2C_Master_SendByte(Data05);
+  I2C_Master_SendByte(Data06);
+  I2C_Master_Stop;
+end;
+
+procedure Command_60_I2C_Controller_SetPortA;
+var
+  Parameter:Byte;
+begin
+  if not GetParameterWithWaitAndBusy(Parameter) then Exit;
+
+  I2C_Master_StartWrite(I2C_ControllerAddress);
+  I2C_Master_SendCommandWithByteParameter($00,Parameter);
+  I2C_Master_Stop;
+end;
+
+procedure Command_61_I2C_Controller_SetPortB;
+var
+  Parameter:Byte;
+begin
+  if not GetParameterWithWaitAndBusy(Parameter) then Exit;
+
+  I2C_Master_StartWrite(I2C_ControllerAddress);
+  I2C_Master_SendCommandWithByteParameter($01,Parameter);
+  I2C_Master_Stop;
+end;
+
+procedure Command_62_I2C_Controller_SetPortC;
+var
+  Parameter:Byte;
+begin
+  if not GetParameterWithWaitAndBusy(Parameter) then Exit;
+
+  I2C_Master_StartWrite(I2C_ControllerAddress);
+  I2C_Master_SendCommandWithByteParameter($02,Parameter);
+  I2C_Master_Stop;
+end;
+
+procedure Command_63_I2C_Controller_SetLEDFlashIntervalInMilliseconds;
+var
+  Parameter:Word;
+begin
+  if not GetParameterWithWaitAndBusy(Parameter) then Exit;
+
+  I2C_Master_StartWrite(I2C_ControllerAddress);
+  I2C_Master_SendCommandWithWordParameter($03,Parameter);
+  I2C_Master_Stop;
+end;
+
+procedure Command_64_I2C_Controller_SetBidirectionalLEDFlashSpeed;
+var
+  Parameter:Byte;
+begin
+  if not GetParameterWithWaitAndBusy(Parameter) then Exit;
+
+  I2C_Master_StartWrite(I2C_ControllerAddress);
+  if Parameter=0 then
+    I2C_Master_SendCommandWithByteParameter($01,$00)
+  else
+    I2C_Master_SendCommandWithByteParameter($01,$80);
+  I2C_Master_Stop;
+end;
+
+procedure Command_65_I2C_Controller_SetPortADirection;
+var
+  Parameter:Byte;
+begin
+  if not GetParameterWithWaitAndBusy(Parameter) then Exit;
+
+  I2C_Master_StartWrite(I2C_ControllerAddress);
+  I2C_Master_SendCommandWithByteParameter($04,Parameter);
+  I2C_Master_Stop;
+end;
+
+procedure Command_66_I2C_Controller_GetPORTA;
+var
+  Parameter:Byte;
+begin
+  I2C_Master_StartWrite(I2C_ControllerAddress);
+  I2C_Master_SendByte($05);
+  I2C_Master_StartRead(I2C_ControllerAddress);
+  Parameter:=I2C_Master_ReceiveByte(True);
+  I2C_Master_StartWrite(I2C_ControllerAddress);
+  I2C_Master_SendCommandWithWordParameter($02,Parameter);
+  I2C_Master_Stop;
+end;
+
+procedure Command_67_I2C_Controller_GetWord;
+var
+  Parameter:Word;
+begin
+  I2C_Master_StartWrite(I2C_ControllerAddress);
+  I2C_Master_SendByte($06);
+  I2C_Master_StartRead(I2C_ControllerAddress);
+  Parameter:=I2C_Master_ReceiveWord(True);
+  I2C_Master_Stop;
+
+  DisplayDecimalValue(Parameter);
+end;
+
+procedure Command_68_I2C_Controller_ReceiveContinuously;
+begin
+  I2C_Master_StartWrite(I2C_ControllerAddress);
+  I2C_Master_SendCommandWithByteParameter($07,$20); // Tell I2C controller to repeatedly send it's PORTA to the display.
+  I2C_Master_Stop;
+
+  repeat
+  until IsKeyAvailable;
+
+  I2C_Master_StartWrite(I2C_ControllerAddress);
+  I2C_Master_SendCommandWithByteParameter($07,$00); // Tell I2C controller to revert to flashing it's lights.
+  I2C_Master_Stop;
+end;
+
+procedure Command_69_I2C_Controller_SetMode;
+var
+  Parameter:Byte;
+begin
+  if not GetParameterWithWaitAndBusy(Parameter) then Exit;
+
+  I2C_Master_StartWrite(I2C_ControllerAddress);
+  I2C_Master_SendCommandWithByteParameter($07,Parameter);
+  I2C_Master_Stop;
+end;
+
+procedure Command_70_SecondBoardPIC_SetDigitSegments;
+var
+  Parameter:Byte;
+begin
+  if not GetParameterWithWaitAndBusy(Parameter) then Exit;
+  
+  I2C_Master_StartWrite(20);
+  I2C_Master_SendByte(0);
+  I2C_Master_SendByte(Parameter);
+  I2C_Master_Stop;
+end;
+
+procedure Command_71_SecondBoardPIC_SetDots;
+var
+  ParameterIndex:Byte;
+  Parameters:Array[0..4] of Byte;
+begin
+  for ParameterIndex:=0 to 4 do
+  begin
+    if not GetParameterWithWaitAndBusy(Parameters[ParameterIndex]) then Exit;
+  end;
+
+  I2C_Master_StartWrite(20);
+  I2C_Master_SendByte(1);
+  for ParameterIndex:=0 to 4 do
+    I2C_Master_SendByte(Parameters[ParameterIndex]);
+  I2C_Master_Stop;
+end;
+
+procedure Command_72_SecondBoardPIC_RandomDice;
+begin
+  I2C_Master_StartWrite(20);
+  I2C_Master_SendByte(3);
+  I2C_Master_Stop;
+end;
+
+procedure Command_73_SecondBoardPIC_ToggleDots;
+begin
+  I2C_Master_StartWrite(20);
+  I2C_Master_SendByte(5);
+  I2C_Master_Stop;
+end;
+
+procedure Command_900(RepeatLastCommand:Boolean);
+// Read one byte from device at given address.
+var
+  Data:Byte;
+begin
+  if not RepeatLastCommand then
+  begin
+    if not GetParameterWithWaitAndBusy(InputParameter_Address) then Exit;
+  end;
+
+  I2C_Master_StartRead(InputParameter_Address);
+  Data:=I2C_Master_ReceiveByte(True);
+  I2C_Master_Stop;
+
+  DisplayDecimalValue(Data);
+end;
+
+procedure Command_901;
+// Send a command.
+var
+  Address,Command:Byte;
+begin
+  if not GetParameterWithWaitAndBusy(Address) then Exit;
+  if not GetParameterWithWaitAndBusy(Command) then Exit;
+
+  I2C_Master_StartWrite(Address);
+  I2C_Master_SendByte(Command);
+  I2C_Master_Stop;
+end;
+
+procedure Command_902;
+// Send a command and one byte parameter.
+var
+  Address,Command,ByteParameter:Byte;
+begin
+  if not GetParameterWithWaitAndBusy(Address) then Exit;
+  if not GetParameterWithWaitAndBusy(Command) then Exit;
+  if not GetParameterWithWaitAndBusy(ByteParameter) then Exit;
+
+  I2C_Master_StartWrite(Address);
+  I2C_Master_SendCommandWithByteParameter(Command,ByteParameter);
+  I2C_Master_Stop;
+end;
+
+procedure Command_903;
+// Send a command and one word parameter.
+var
+  Address,Command:Byte;
+  WordParameter:Word;
+begin
+  if not GetParameterWithWaitAndBusy(Address) then Exit;
+  if not GetParameterWithWaitAndBusy(Command) then Exit;
+  if not GetParameterWithWaitAndBusy(WordParameter) then Exit;
+
+  I2C_Master_StartWrite(Address);
+  I2C_Master_SendCommandWithWordParameter(Command,WordParameter);
+  I2C_Master_Stop;
+end;
+
+procedure Command_920_SpeechChip_EraseMessages;
+var
+  FirstMessageIndex,LastMessageIndex,MessageIndex,Address:Word;
+begin
+  if not ReadAllowRecordingOfSystemRecordings then begin SayMessage(MessageIndex_SystemRecordingsAreLocked,True); Exit; end;
+
+  if not GetParameterWithWaitAndBusy(FirstMessageIndex) then Exit;
+  if FirstMessageIndex>MessageIndex_LastSystemMessage then begin DisplayError; Exit; end;
+  if not GetParameterWithWaitAndBusy(LastMessageIndex) then Exit;
+  if LastMessageIndex>MessageIndex_LastSystemMessage then begin DisplayError; Exit; end;
+  if FirstMessageIndex>LastMessageIndex then begin DisplayError; Exit; end;
+
+  SetRecordConfiguration(False,False,True);
+
+  for MessageIndex:=FirstMessageIndex to LastMessageIndex do
+  begin
+    Address:=MessageIndex shl 9;
+
+    I2C_Master_StartWrite(GetSpeechChipI2CAddress(False));
+    I2C_Master_SendByte($91);
+    I2C_Master_SendByte(Hi(Address)); // Note: High byte first!
+    I2C_Master_SendByte(Lo(Address));
+    I2C_Master_Stop;
+
+    StopSpeechChip(False);
+    WaitForSpeechChipReady(False);
+  end;
+end;
+
+procedure Command_921_SpeechChip_RecordMessage;
+var
+  MessageIndex:Integer;
+  MinStartPosition,MaxEndPosition,StartPosition,EndPosition:Word;
+begin
+  if not ReadAllowRecordingOfSystemRecordings then begin SayMessage(MessageIndex_SystemRecordingsAreLocked,True); Exit; end;
+
+  repeat
+    if not GetParameterWithWaitAndBusy(MessageIndex) then Exit;
+
+    StartPosition:=GetPositionFromMessageIndex(MessageIndex);
+    EndPosition:=StartPosition+4;
+
+    RecordFromGivenPosition(False,False,StartPosition,EndPosition);
+
+    ClearKeyBuffer; // Eat "Terminate" key (if pressed).
+
+    DelayMS(1000);
+
+    DisplayDecimalValue(MessageIndex);
+    SayMessage(MessageIndex,False);
+  until False;
+end;
+
+procedure Command_922_SpeechChip_PlayMessage;
+var
+  GetValueResult:Byte;
+  Value,MessageIndex:Integer;
+begin
+  MessageIndex:=0;
+
+  repeat
+    SetWaiting;
+    GetValueResult:=GetValue(Value);
+    if GetValueResult=GetValueResult_Cancel then Exit;
+    if GetValueResult=GetValueResult_LineBlank then
+      Inc(MessageIndex)
+    else
+      MessageIndex:=Value;
+
+    SetBusy;
+    DisplayDecimalValue(MessageIndex);
+    SayMessage(MessageIndex,False);
+    SetNotBusy;
+  until False;
+end;
+
+procedure Command_923_SpeechChip_LockSystemRecordings;
+var
+  Confirm:Word;
+begin
+  if not GetParameterWithWaitAndBusy(Confirm) then Exit;
+  if Confirm<>1 then Exit;
+  DisableRecordingOfSystemRecordings;
+end;
+
+procedure Command_924_SpeechChip_RecordSystemMusic;
+var
+  Value,MinStartPosition,MaxEndPosition,StartPosition,EndPosition:Word;
+  RecordFromAux:Boolean;
+begin
+  if not ReadAllowRecordingOfSystemRecordings then begin SayMessage(MessageIndex_SystemRecordingsAreLocked,True); Exit; end;
+
+  repeat
+    if not GetParameterWithWaitAndBusy(Value) then Exit;
+    if (Value=0) or (Value=1) then break;
+    SayMessage(MessageIndex_InvalidSource,True);
+  until False;
+  RecordFromAux:=(Value=1);
+
+  MinStartPosition:=SystemMusicPosition_Start;
+  MaxEndPosition:=511;
+
+  repeat
+    if not GetParameterWithWaitAndBusy(StartPosition) then Exit;
+    if (StartPosition>=MinStartPosition) and (StartPosition<=MaxEndPosition) then break;
+    SayMessage(MessageIndex_InvalidPosition,True);
+  until False;
+
+  repeat
+    if not GetParameterWithWaitAndBusy(EndPosition) then Exit;
+    if (EndPosition>=StartPosition) and (EndPosition<=MaxEndPosition) then break;
+    SayMessage(MessageIndex_InvalidPosition,True);
+  until False;
+
+  RecordFromGivenPosition(False,RecordFromAux,StartPosition,EndPosition);
+end;
+
+procedure Command_930_SpeechChip_GetStatus;
+var
+  Status:Byte;
+begin
+  Status:=GetSpeechChipStatus(0);
+  DisplayHexadecimalValue(Status);
+end;
+
+procedure Command_931_SpeechChip_GetPosition;
+var
+  Position:Word;
+begin
+  GetSpeechChipStatusAndPosition(False,Position);
+  DisplayDecimalValue(Position);
+end;
+
+procedure Command_932_SpeechChip_SendCommand;
+var
+  Command:Byte;
+begin
+  if not GetParameterWithWaitAndBusy(Command) then Exit;
+
+  I2C_Master_StartWrite(GetSpeechChipI2CAddress(False));
+  I2C_Master_SendByte(Command);
+  I2C_Master_Stop;
+end;
+
+procedure Command_933_SpeechChip_SendCommandAndParameter;
+var
+  Command:Byte;
+  WordParameter:Word;
+begin
+  if not GetParameterWithWaitAndBusy(Command) then Exit;
+  if not GetParameterWithWaitAndBusy(WordParameter) then Exit;
+
+  I2C_Master_StartWrite(GetSpeechChipI2CAddress(False));
+  I2C_Master_SendByte(Command);
+  I2C_Master_SendByte(Hi(WordParameter)); // Note: High byte first!
+  I2C_Master_SendByte(Lo(WordParameter));
+  I2C_Master_Stop;
+
+  DisplayHexadecimalValue(WordParameter);
+end;
+
+procedure Command_934_SpeechChip_SendConfigurationWords;
+var
+  CFG0,CFG1:Word;
+begin
+  if not GetParameterWithWaitAndBusy(CFG0) then Exit;
+  DisplayHexadecimalValue(CFG0);
+
+  if not GetParameterWithWaitAndBusy(CFG1) then Exit;
+  DisplayHexadecimalValue(CFG1);
+
+  SetSpeechChipConfiguration(False,CFG0,CFG1);
+
+  SetBusy;
+  repeat until IsKeyAvailable;
+  SetNotBusy;
+end;
+
+procedure Command_935_SpeechChip_Stop;
+begin
+  StopSpeechChip(False);
+end;
+
+procedure ProcessCommands;
+var
+  Command:Word;
+begin
+  while True do
+  begin
+    case GetCommandWithBusy(Command) of
+      Byte(GetValueResult_Value):
+      begin
+        LastCommand:=Command;
+
+        if Locked then
+        begin
+          if (Command<>PassNumber) then
+            SayMessage(MessageIndex_InvalidLogon,True)
+          else
+            Locked:=False;
+        end
+        else
+        begin
+          if Command=PassNumber then break; // Switch off.
+
+          if AutoHelpEnabled then
+            SayMessage(GetMessageIndexForCommand(Command),False);
+
+          case Command of
+            // Miscellaneous:
+            0: Command_0_Help;
+            1: Command_1_ToggleAutoHelp;
+            2: Command_2_ToggleSleep;
+            3: Command_3_SpeechChip_SetVolume;
+            8: Command_8_SendAuxInToSpeaker;
+            9: Command_9_ChangePassNumber;
+
+            // Seven segment display.
+            10: Command_10_SevenSegmentDisplay_SlowlyDescendingCount;
+            11: Command_11_SevenSegmentDisplay_SlowlyAscendingCount;
+            12: Command_12_SevenSegmentDisplay_RapidlyDescendingCount;
+            13: Command_13_SevenSegmentDisplay_RapidlyAscendingCount;
+            14: Command_14_SevenSegmentDisplay_LightBall;
+            15: Command_15_SevenSegmentDisplay_VoltMeter;
+            16: Command_16_SevenSegmentDisplay_ResetDisplay;
+            17: Command_17_SevenSegmentDisplay_DimDisplay;
+            18: Command_18_SevenSegmentDisplay_DisplayDecimalValue;
+            19: Command_19_SevenSegmentDisplay_DisplayHexadecimalValue;
+
+            // Speech chip:
+            30: Command_30_SpeechChip_GetStatus;
+            31: Command_31_SpeechChip_GetPosition;
+            32: Command_32_SpeechChip_SendCommand;
+            33: Command_33_SpeechChip_SendCommandAndParameter;
+            34: Command_34_SpeechChip_SendConfigurationWords;
+            35: Command_35_SpeechChip_Stop;
+            36: Command_36_SpeechChip_RecordFromGivenPosition;
+            37: Command_37_SpeechChip_PlayFromGivenPosition(False);
+
+            // Clock:
+            40: Command_40_Clock_DisplayMinutesAndSeconds;
+            41: Command_41_Clock_DisplayHoursAndMinutes;
+            42: Command_42_Clock_DisplayDateAndMonth;
+            47: Command_47_Clock_SetHoursMinutesAndSeconds;
+            48: Command_48_Clock_SetDay;
+            49: Command_49_Clock_SetDateMonthAndYear;
+
+            // I2C controller:
+            60: Command_60_I2C_Controller_SetPortA;
+            61: Command_61_I2C_Controller_SetPortB;
+            62: Command_62_I2C_Controller_SetPortC;
+            63: Command_63_I2C_Controller_SetLEDFlashIntervalInMilliseconds;
+            64: Command_64_I2C_Controller_SetBidirectionalLEDFlashSpeed;
+            65: Command_65_I2C_Controller_SetPortADirection;
+(*
+            66: Command_66_I2C_Controller_GetPORTA;
+            67: Command_67_I2C_Controller_GetWord;
+*)
+            68: Command_68_I2C_Controller_ReceiveContinuously;
+            69: Command_69_I2C_Controller_SetMode;
+
+            // Second board PIC:
+            70: Command_70_SecondBoardPIC_SetDigitSegments;
+            71: Command_71_SecondBoardPIC_SetDots;
+            72: Command_72_SecondBoardPIC_RandomDice;
+            73: Command_73_SecondBoardPIC_ToggleDots;
+
+            // Miscellaneous:
+            900: Command_900(False); // Receive byte directly from other chips.
+            901: Command_901; // Send commands directly to other chips.
+            902: Command_902; // Send commands directly to other chips.
+            903: Command_903; // Send commands directly to other chips.
+            920: Command_920_SpeechChip_EraseMessages;
+            921: Command_921_SpeechChip_RecordMessage;
+            922: Command_922_SpeechChip_PlayMessage;
+            923: Command_923_SpeechChip_LockSystemRecordings;
+            924: Command_924_SpeechChip_RecordSystemMusic;
+            930: Command_930_SpeechChip_GetStatus;
+            931: Command_931_SpeechChip_GetPosition;
+            932: Command_932_SpeechChip_SendCommand;
+            933: Command_933_SpeechChip_SendCommandAndParameter;
+            934: Command_934_SpeechChip_SendConfigurationWords;
+            935: Command_935_SpeechChip_Stop
+
+            else
+            begin
+              SayMessage(MessageIndex_InvalidCommand,True);
+            end;
+          end;
+        end;
+      end;
+
+      Byte(GetValueResult_LineBlank):
+      begin
+        case LastCommand of
+          37: Command_37_SpeechChip_PlayFromGivenPosition(True); // Speech chip.
+          72: Command_72_SecondBoardPIC_RandomDice;
+          73: Command_73_SecondBoardPIC_ToggleDots;
+          900: Command_900(True); // Receive byte directly from other chips.
+        end;
+      end;
+    end;
+  end;
+end;
+
+begin
+  Initialize;
+  
+  repeat
+    Logon;
+    ProcessCommands;
+    Goodbye;
+  until False;
+end.

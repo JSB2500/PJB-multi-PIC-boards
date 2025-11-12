@@ -1,0 +1,35 @@
+[DeviceName]
+Value=P16F872
+[DeviceClock]
+Value=20
+[MainUnit]
+Value=I2C.ppas
+[DeviceFlags]
+Count=4
+Value0=_LVP_OFF = $3F7F
+Value1=_PWRTE_ON = $3FF7
+Value2=_WDT_OFF = $3FFB
+Value3=_HS_OSC = $3FFE
+Value4=_DEBUG_ON = $37FF
+[ProjectFiles]
+Count=0
+[OtherFiles]
+Count=1
+Value0=C:\PICs\Mikro Pascal\I2C\I2C.ppas
+Value1=C:\PICs\Mikro Pascal\Library\UI2C.ppas
+Value2=C:\PICs\Mikro Pascal\Library\UI2C.ppas
+Value3=C:\PICs\Mikro Pascal\I2C\I2C.asm
+[TabIndex]
+Value=0
+[SearchPath]
+Count=5
+Value0=E:\Program Files\Mikroelektronika\mikroPascal\Defs\
+Value1=E:\Program Files\Mikroelektronika\mikroPascal\Uses\p16\
+Value2=C:\PICs\Mikro Pascal\I2C\
+Value3=C:\PICs\Mikro Pascal\Keypad\
+Value4=C:\PICs\Mikro Pascal\Library\
+[EEPROMinfo]
+isused=0
+[BuildSimDebug]
+Build=0
+SimDebug=0

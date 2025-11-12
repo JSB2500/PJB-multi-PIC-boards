@@ -1,0 +1,342 @@
+program I2C;
+
+uses
+  UGeneral, UI2C;
+
+const
+  SlaveAddress=36;
+
+var
+  Mode,Interrupt_Mode:Byte;
+  DelayTimeMS:Word;
+  I2CCommand:Byte; // Must be preserved between instructions to control data read from us.
+  MandatoryByte:Byte;
+  PORTA_BitPolarity,PORTB_BitPolarity,PORTC_BitPolarity:Byte;
+  Interrupt_SetDefaultOptions,Interrupt_SaveOptionsToEEPROM:Boolean;
+  MainThread_SetDefaultOptions,MainThread_SaveOptionsToEEPROM:Boolean;
+  
+procedure I2CInterrupt;
+var
+  ByteParameter:Byte;
+  WordParameter:Word;
+begin
+  // Prevent SSPIF being handled inadvertently if PIE1.SSPIE=False and the interrupt handler is called by another
+  // source (e.g. a timer) when SSPIF=True as it often is during I2C master mode transactions.
+  if PIE1.SSPIE=False then Exit;
+
+  if PIR1.SSPIF then
+  begin
+    if (SSPSTAT.D_A=0) then // Command.
+    begin
+      if SSPSTAT.R_W then
+      begin
+        case I2CCommand of
+          $05: I2C_Slave_SendByte(PORTA);
+          $06: I2C_Slave_SendWord(DelayTimeMS);
+        end;
+      end
+      else
+      begin
+        if SSPSTAT.BF then
+        begin
+          MandatoryByte:=SSPBUF; // Make sure this is not optimized out!
+          SSPSTAT.SSPOV:=False;
+
+          I2CCommand:=I2C_Slave_ReceiveByte;
+
+          case I2CCommand of
+            0:
+            begin
+              PORTA:=I2C_Slave_ReceiveByte xor PORTA_BitPolarity;
+              Interrupt_SaveOptionsToEEPROM:=True;
+            end;
+            
+            1:
+            begin
+              PORTB:=I2C_Slave_ReceiveByte xor PORTB_BitPolarity;
+              Interrupt_SaveOptionsToEEPROM:=True;
+            end;
+            
+            2:
+            begin
+              PORTC:=I2C_Slave_ReceiveByte xor PORTC_BitPolarity;
+              Interrupt_SaveOptionsToEEPROM:=True;
+            end;
+
+            3:
+            begin
+              WordParameter:=I2C_Slave_ReceiveWord;
+              if (WordParameter<>0) and (WordParameter<=5000) then
+              begin
+                DelayTimeMS:=WordParameter;
+                Interrupt_SaveOptionsToEEPROM:=True;
+              end;
+            end;
+
+            4:
+            begin
+              ByteParameter:=I2C_Slave_ReceiveByte;
+              TRISA:=ByteParameter;
+            end;
+
+            5: begin end; // Read PORTA.
+
+            6: begin end; // 16 bit read.
+
+            7: // Set mode.
+            begin
+              Interrupt_Mode:=I2C_Slave_ReceiveByte;
+              Interrupt_SaveOptionsToEEPROM:=True;
+            end;
+
+            8:
+            begin
+              PORTA_BitPolarity:=I2C_Slave_ReceiveByte;
+              Interrupt_SaveOptionsToEEPROM:=True;
+            end;
+            
+            9:
+            begin
+              PORTB_BitPolarity:=I2C_Slave_ReceiveByte;
+              Interrupt_SaveOptionsToEEPROM:=True;
+            end;
+            
+            10:
+            begin
+              PORTC_BitPolarity:=I2C_Slave_ReceiveByte;
+              Interrupt_SaveOptionsToEEPROM:=True;
+            end;
+
+            999:
+            begin
+              Interrupt_SetDefaultOptions:=True;
+              Interrupt_SaveOptionsToEEPROM:=True;
+            end;
+          end;
+        end;
+      end;
+    end;
+
+    PIR1.SSPIF:=False;
+  end;
+end;
+
+procedure interrupt;
+begin
+  I2CInterrupt;
+end;
+
+procedure SendPortAToDisplay;
+begin
+  TRISA:=$FF;
+
+  I2C_Master_StartWrite($28);
+  I2C_Master_SendCommandWithWordParameter($02,PORTA);
+  I2C_Master_Stop;
+
+  DelayMS(50); // Reduce flicker.
+end;
+
+procedure SetDefaultOptions;
+begin
+  PORTA_BitPolarity:=$00;
+  PORTB_BitPolarity:=$00;
+  PORTC_BitPolarity:=$00;
+  PORTA:=$00;
+  PORTB:=$00;
+  PORTC:=$00;
+  Mode:=-1;
+  DelayTimeMS:=500;
+end;
+
+procedure LoadOptionsFromEEPROM;
+begin
+  if EEPROM_ReadByte($00)=$FF then Exit; // Check options are valid.
+
+  PORTA_BitPolarity:=EEPROM_ReadByte($01);
+  PORTB_BitPolarity:=EEPROM_ReadByte($02);
+  PORTC_BitPolarity:=EEPROM_ReadByte($03);
+  PORTA:=EEPROM_ReadByte($04);
+  PORTB:=EEPROM_ReadByte($05);
+  PORTC:=EEPROM_ReadByte($06);
+  Mode:=EEPROM_ReadByte($07);
+  DelayTimeMS:=EEPROM_ReadWord($08);
+end;
+
+procedure SaveOptionsToEEPROM;
+begin
+  EEPROM_WriteByte($00,$00); // $00=Options valid.
+  EEPROM_WriteByte($01,PORTA_BitPolarity);
+  EEPROM_WriteByte($02,PORTB_BitPolarity);
+  EEPROM_WriteByte($03,PORTC_BitPolarity);
+  EEPROM_WriteByte($04,PORTA);
+  EEPROM_WriteByte($05,PORTB);
+  EEPROM_WriteByte($06,PORTC);
+  EEPROM_WriteByte($07,Mode);
+  EEPROM_WriteWord($08,DelayTimeMS);
+end;
+
+begin
+  OPTION_REG:=$D7; // Includes timer 0 prescale.
+
+  // Setup PA pins to digital.
+  ADCON0:=$00;
+  ADCON1:=$06;
+
+  I2CCommand:=-1;
+  Interrupt_SetDefaultOptions:=False;
+  Interrupt_SaveOptionsToEEPROM:=False;
+
+  SetDefaultOptions;
+  LoadOptionsFromEEPROM;
+
+  // Set these AFTER options are loaded to prevent transient output errors whilst options are loaded.
+  TRISA:=$FF;
+  TRISB:=$00;
+  TRISC:=$18;
+
+  I2C_Initialize(SlaveAddress,True);
+
+  INTCON:=$C0;
+  
+  // Block teh complex modes that might crash and lock the bus.
+  if Mode>=16 then Mode:=0;
+  
+  Interrupt_Mode:=Mode;
+
+  repeat
+    // Exchange data with interrupt.
+    GlobalDisableInterrupts;
+    Mode:=Interrupt_Mode;
+    MainThread_SetDefaultOptions:=Interrupt_SetDefaultOptions;
+    Interrupt_SetDefaultOptions:=False;
+    MainThread_SaveOptionsToEEPROM:=Interrupt_SaveOptionsToEEPROM;
+    Interrupt_SaveOptionsToEEPROM:=False;
+    INTCON.GIE:=True;
+
+    if MainThread_SetDefaultOptions then
+      SetDefaultOptions;
+
+    if MainThread_SaveOptionsToEEPROM then
+      SaveOptionsToEEPROM;
+
+    case Mode of
+      $00:
+      begin
+        // Green LED block.
+        PORTC.0:=1;
+        PORTC.1:=0;
+        PORTC.2:=1;
+
+        // RGB LEDs.
+        PORTC.5:=1;
+        PORTC.6:=0;
+        PORTC.7:=1;
+
+        DelayMS(DelayTimeMS);
+
+        // Green LED block.
+        PORTC.0:=0;
+        PORTC.1:=1;
+        PORTC.2:=0;
+
+        // RGB LEDs.
+        PORTC.5:=0;
+        PORTC.6:=1;
+        PORTC.7:=0;
+
+        DelayMS(DelayTimeMS);
+      end;
+      
+      $01:
+      begin
+        PORTC:=%00100001;
+        DelayMS(DelayTimeMS);
+        PORTC:=%01000010;
+        DelayMS(DelayTimeMS);
+        PORTC:=%10000100;
+        DelayMS(DelayTimeMS);
+      end;
+
+      $02:
+      begin
+        PORTC:=%10000100;
+        DelayMS(DelayTimeMS);
+        PORTC:=%01000010;
+        DelayMS(DelayTimeMS);
+        PORTC:=%00100001;
+        DelayMS(DelayTimeMS);
+      end;
+
+      $03:
+      begin
+        PORTC:=%00000001;
+        DelayMS(DelayTimeMS);
+        PORTC:=%00000010;
+        DelayMS(DelayTimeMS);
+        PORTC:=%00000100;
+        DelayMS(DelayTimeMS);
+        PORTC:=%00100000;
+        DelayMS(DelayTimeMS);
+        PORTC:=%01000000;
+        DelayMS(DelayTimeMS);
+        PORTC:=%10000000;
+        DelayMS(DelayTimeMS);
+      end;
+
+      $04:
+      begin
+        PORTC:=%10000000;
+        DelayMS(DelayTimeMS);
+        PORTC:=%01000000;
+        DelayMS(DelayTimeMS);
+        PORTC:=%00100000;
+        DelayMS(DelayTimeMS);
+        PORTC:=%00000100;
+        DelayMS(DelayTimeMS);
+        PORTC:=%00000010;
+        DelayMS(DelayTimeMS);
+        PORTC:=%00000001;
+        DelayMS(DelayTimeMS);
+      end;
+
+      $05:
+      begin
+        PORTC:=%00100001;
+        DelayMS(DelayTimeMS);
+        PORTC:=%01000010;
+        DelayMS(DelayTimeMS);
+        PORTC:=%10000100;
+        DelayMS(DelayTimeMS);
+        PORTC:=%01000010;
+        DelayMS(DelayTimeMS);
+      end;
+
+      $06:
+      begin
+        PORTC:=%10000000;
+        DelayMS(DelayTimeMS);
+        PORTC:=%01000000;
+        DelayMS(DelayTimeMS);
+        PORTC:=%00100000;
+        DelayMS(DelayTimeMS);
+        PORTC:=%00000100;
+        DelayMS(DelayTimeMS);
+        PORTC:=%00000010;
+        DelayMS(DelayTimeMS);
+        PORTC:=%00000001;
+        DelayMS(DelayTimeMS);
+        PORTC:=%00000010;
+        DelayMS(DelayTimeMS);
+        PORTC:=%00000100;
+        DelayMS(DelayTimeMS);
+        PORTC:=%00100000;
+        DelayMS(DelayTimeMS);
+        PORTC:=%01000000;
+        DelayMS(DelayTimeMS);
+      end;
+
+      32: SendPortAToDisplay;
+    end;
+  until False;
+end.

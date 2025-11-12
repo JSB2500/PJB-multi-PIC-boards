@@ -1,0 +1,37 @@
+[DeviceName]
+Value=P16F872
+[DeviceClock]
+Value=20
+[MainUnit]
+Value=SevenSegmentDisplays.ppas
+[DeviceFlags]
+Count=4
+Value0=_LVP_OFF = $3F7F
+Value1=_PWRTE_OFF = $3FFF
+Value2=_WDT_OFF = $3FFB
+Value3=_HS_OSC = $3FFE
+[ProjectFiles]
+Count=0
+[OtherFiles]
+Count=2
+Value0=C:\PICs\Mikro Pascal\Seven segment displays\SevenSegmentDisplays.ppas
+Value1=C:\PICs\Mikro Pascal\Library\UI2C.ppas
+Value2=C:\PICs\Mikro Pascal\Keypad\Keypad.ppas
+Value3=C:\PICs\Mikro Pascal\Keypad\Keypad.ppas
+Value4=C:\PICs\Mikro Pascal\I2C\I2C.ppas
+[TabIndex]
+Value=0
+[SearchPath]
+Count=4
+Value0=E:\Program Files\Mikroelektronika\mikroPascal\Defs\
+Value1=E:\Program Files\Mikroelektronika\mikroPascal\Uses\p16\
+Value2=C:\PICs\Mikro Pascal\Seven segment displays\
+Value3=C:\PICs\Mikro Pascal\Library\
+Value4=E:\Program Files\Mikroelektronika\mikroPascal\Uses\p16\
+Value5=C:\PICs\Mikro Pascal\Full Colour LED\
+Value6=C:\PICs\Mikro Pascal\Library\
+[EEPROMinfo]
+isused=0
+[BuildSimDebug]
+Build=0
+SimDebug=0

@@ -1,0 +1,17 @@
+[frmWatchValues]
+FormVersion=0
+Name1=_displaydots
+ShowType1=0
+Signed1=FALSE
+WatchCount=1
+Column0=100
+Column1=80
+Column2=80
+ShowCmd=1
+Flags=0
+PixelsPerInch=96
+MinMaxPos(1360x1024)=-1,-1,-1,-1
+MinMaxPos=-1,-1,-1,-1
+NormPos(1360x1024)=946,18,1367,962
+NormPos=946,18,1367,962
+

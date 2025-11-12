@@ -1,0 +1,482 @@
+program SevenSegmentDisplays;
+
+uses
+  UGeneral, UI2C;
+
+const
+  SevenSegment:Array[0..15] of Byte=(63,6,91,79,102,109,125,7,127,111,119,124,57,94,121,113);
+
+var
+  Digits:Array[0..3] of Byte;
+  CounterValue:Word;
+  LightBallPhase:Byte;
+  DisplayMask:Byte;
+  DigitMasks:Array[0..3] of Byte;
+  RedLEDDrive,GreenLEDDrive,BlueLEDDrive:Byte;
+  SevenSegmentDisplayCount,FullColourLEDDisplayCount:Byte;
+  Mode,Interrupt_Mode:Byte;
+  CommandValue:Word;
+  MandatoryByte:Byte;
+  DimDisplay:Byte;
+
+procedure I2CInterrupt;
+var
+  Command,ByteParameter:Byte;
+begin
+  // Prevent SSPIF being handled inadvertently if PIE1.SSPIE=False and the interrupt handler is called by another
+  // source (e.g. a timer) when SSPIF=True as it often is during I2C master mode transactions.
+  if PIE1.SSPIE=False then Exit;
+  
+  if PIR1.SSPIF then
+  begin
+    if (SSPSTAT.D_A=0) then // Command.
+    begin
+      if SSPSTAT.R_W then
+      begin
+        // ...
+      end
+      else
+      begin
+        MandatoryByte:=SSPBUF; // Make sure this is not optimized out!
+        SSPSTAT.SSPOV:=False;
+
+        Command:=I2C_Slave_ReceiveByte;
+
+        case Command of
+          $00: Interrupt_Mode:=-1;
+
+          $01:
+          begin
+            ByteParameter:=I2C_Slave_ReceiveByte;
+            if ByteParameter<=7 then
+              Interrupt_Mode:=ByteParameter;
+          end;
+
+          $02: // Display decimal word.
+          begin
+            CommandValue:=I2C_Slave_ReceiveWord;
+            Interrupt_Mode:=8;
+          end;
+
+          $03:
+          begin
+            DimDisplay:=I2C_Slave_ReceiveByte;
+          end;
+
+          $04: // Display hexadecimal word.
+          begin
+            CommandValue:=I2C_Slave_ReceiveWord;
+            Interrupt_Mode:=9;
+          end;
+        end;
+      end;
+    end;
+
+    PIR1.SSPIF:=False;
+  end;
+end;
+
+procedure SevenSegmentInterrupt;
+begin
+  if INTCON.T0IE=False then Exit;
+  
+  if INTCON.T0IF then
+  begin
+    // *** Seven segment displays ***
+
+    if SevenSegmentDisplayCount=0 then // Don't run seven segments too fast or adjacent segments light up.
+    begin
+      PORTB:=not DisplayMask;
+
+      PORTC.0:=(DigitMasks[0] and DisplayMask)<>0;
+      PORTC.1:=(DigitMasks[1] and DisplayMask)<>0;
+      PORTC.2:=(DigitMasks[2] and DisplayMask)<>0;
+      PORTA.5:=(DigitMasks[3] and DisplayMask)<>0;
+
+      DisplayMask:=DisplayMask shl 1;
+      if DisplayMask=$00 then
+        DisplayMask:=$01;
+    end;
+    
+    if DimDisplay and (SevenSegmentDisplayCount>=2) then
+    begin
+      PORTB:=$FF;
+    end;
+
+    // *** Full colour LED ***
+
+    // Outputs are inverted and LEDs connect to VDD to get highest available drive current.
+    // Drive range is 0 to 39.
+    PORTC.5:=(FullColourLEDDisplayCount>=RedLEDDrive);
+    PORTC.6:=(FullColourLEDDisplayCount>=GreenLEDDrive);
+    PORTC.7:=(FullColourLEDDisplayCount>=BlueLEDDrive);
+
+    Inc(SevenSegmentDisplayCount);
+    if SevenSegmentDisplayCount=4 then
+      SevenSegmentDisplayCount:=0;
+    
+    if FullColourLEDDisplayCount=39 then
+      FullColourLEDDisplayCount:=0
+    else
+      Inc(FullColourLEDDisplayCount);
+
+    INTCON.T0IF:=False;
+  end;
+end;
+
+procedure interrupt;
+begin
+  I2CInterrupt;
+  SevenSegmentInterrupt;
+end;
+
+function CalculateDigitMask(Digit:Byte;IsHexadecimal:Boolean):Byte;
+begin
+  if (not IsHexadecimal) and (Digit>9) then
+    Result:=$79 // 'E' for error.
+  else if IsHexadecimal and (Digit>15) then
+    Result:=$79 // 'E' for error.
+  else
+   Result:=SevenSegment[Digit];
+end;
+
+procedure DisplayDigits(DecimalPoint,NumDigits:Byte;IsHexadecimal:Boolean);
+var
+  DigitIndex:Byte;
+begin
+  for DigitIndex:=0 to 3 do
+  begin
+    if NumDigits>DigitIndex then
+    begin
+      DigitMasks[DigitIndex]:=CalculateDigitMask(Digits[DigitIndex],IsHexadecimal);
+      if DecimalPoint=DigitIndex then
+        DigitMasks[DigitIndex]:=DigitMasks[DigitIndex] or $80;
+    end
+    else
+      DigitMasks[DigitIndex]:=0;
+  end;
+
+  RedLEDDrive:=Digits[0] shl 2;
+  GreenLEDDrive:=Digits[1] shl 2;
+  BlueLEDDrive:=Digits[2] shl 2;
+end;
+
+procedure CalculateDecimalDigits(Value:Word;var Digits:Array[0..3] of Byte);
+begin
+  Digits[0]:=0;
+  Digits[1]:=0;
+  Digits[2]:=0;
+  Digits[3]:=0;
+
+  while Value>=1000 do
+  begin
+    Value:=Value-1000;
+    Inc(Digits[3]);
+  end;
+
+  while Value>=100 do
+  begin
+    Value:=Value-100;
+    Inc(Digits[2]);
+  end;
+
+  while Value>=10 do
+  begin
+    Value:=Value-10;
+    Inc(Digits[1]);
+  end;
+
+  Digits[0]:=Value;
+end;
+
+procedure DisplayDecimalWord(Value:Word;DecimalPoint,NumDigits:Byte);
+begin
+  CalculateDecimalDigits(Value,Digits);
+  DisplayDigits(DecimalPoint,NumDigits,False);
+end;
+
+procedure CalculateHexadecimalDigits(Value:Word;var Digits:Array[0..3] of Byte);
+begin
+  Digits[0]:=Value and $F;
+  Value:=Value shr 4;
+  Digits[1]:=Value and $F;
+  Value:=Value shr 4;
+  Digits[2]:=Value and $F;
+  Value:=Value shr 4;
+  Digits[3]:=Value and $F;
+end;
+
+procedure DisplayHexadecimalWord(Value:Word);
+begin
+  CalculateHexadecimalDigits(Value,Digits);
+  DisplayDigits(-1,4,True);
+end;
+
+procedure ShowHappyFace;
+begin
+  DigitMasks[0]:=$63;
+  DigitMasks[1]:=$1C;
+  DigitMasks[2]:=$63;
+  DigitMasks[3]:=$00;
+end;
+
+procedure DoVoltMeter;
+var
+  ADCResult:Word;
+  SpeechBusy:Byte;
+begin
+  // Start measuring input voltage.
+  SetBit(ADCON0,Go);
+
+  // Wait for measurement to complete.
+  while ADCON0.Go do begin end;
+
+  // Get measurement and scale.
+  ADCResult:=ADRESL+(ADRESH shl 8);
+
+  // Display measurement.
+  if ADCResult=1023 then
+  begin
+    // Display overload message.
+    DigitMasks[3]:=$00;
+    DigitMasks[2]:=$3F; // 'O'
+    DigitMasks[1]:=$3E; // 'V'
+    DigitMasks[0]:=$38; // 'L'
+
+    RedLEDDrive:=39;
+    GreenLEDDrive:=39;
+    BlueLEDDrive:=39;
+
+    I2C_Master_StartWrite($20);
+    I2C_Master_SendCommandWithByteParameter($00,15);
+    I2C_Master_Stop;
+
+    DelayMS(3); // Wait for slow interrupt handler in keypad controller.
+
+    // Wait for sound to stop.
+    repeat
+      I2C_Master_StartWrite($20);
+      I2C_Master_SendByte($01);
+      I2C_Master_StartRead($20);
+      SpeechBusy:=I2C_Master_ReceiveByte(True);
+      I2C_Master_Stop;
+    until (SpeechBusy=False);
+
+    DelayMS(500); // Gap between repeated messages.
+  end
+  else
+  begin
+    // Convert to volts (approx).
+    ADCResult:=ADCResult shr 1;
+
+    DisplayDecimalWord(ADCResult,2,4);
+
+    DelayMS(100); // Reduce flickering.
+  end;
+end;
+
+procedure DoLightBall;
+begin
+  case LightBallPhase of
+    0:
+    begin
+      Dec(RedLEDDrive);
+      Inc(BlueLEDDrive);
+    end;
+
+    1:
+    begin
+      Dec(BlueLEDDrive);
+      Inc(GreenLEDDrive);
+    end;
+
+    2:
+    begin
+      Dec(GreenLEDDrive);
+      Inc(RedLEDDrive);
+    end;
+  end;
+
+  Digits[0]:=RedLEDDrive shr 2;
+  Digits[1]:=GreenLEDDrive shr 2;
+  Digits[2]:=BlueLEDDrive shr 2;
+  Digits[3]:=0;
+
+  DigitMasks[0]:=CalculateDigitMask(Digits[0],False);
+  DigitMasks[1]:=CalculateDigitMask(Digits[1],False);
+  DigitMasks[2]:=CalculateDigitMask(Digits[2],False);
+  DigitMasks[3]:=$00;
+
+  DelayMS(200);
+
+  case LightBallPhase of
+    0:
+    begin
+      if BlueLEDDrive=39 then
+      begin
+        LightBallPhase:=1;
+        DelayMS(1000);
+      end;
+    end;
+
+    1:
+    begin
+      if GreenLEDDrive=39 then
+      begin
+        LightBallPhase:=2;
+        DelayMS(1000);
+      end;
+    end;
+
+    2:
+    begin
+      if RedLEDDrive=39 then
+      begin
+        LightBallPhase:=0;
+        DelayMS(1000);
+      end;
+    end;
+  end;
+end;
+
+procedure DoCounter;
+begin
+  DisplayDecimalWord(CounterValue,-1,3);
+
+  // Wait.
+  if Mode.2 then
+    DelayMS(10)
+  else
+    DelayMS(200);
+
+  // Update count.
+  if Mode.1 then
+  begin
+    if CounterValue=999 then
+      CounterValue:=0
+    else
+      Inc(CounterValue);
+  end
+  else
+  begin
+    if CounterValue=0 then
+      CounterValue:=999
+    else
+      Dec(CounterValue);
+  end;
+end;
+
+procedure Initialize;
+begin
+  OPTION_REG:=$D2; // Timer 0 prescaler.
+
+  // Setup analogue to digital converter.
+  ADCON0:=$C1;
+  ADCON1:=$8E;
+
+  TRISA:=%11011111; // Bit 5 is for fourth digit of display.
+
+  TRISB:=$00;
+  PORTB:=$00;
+
+  TRISC:=$18;
+  PORTC:=$E0; // Start with full colour LEDs off (outputs high).
+
+  DimDisplay:=False;
+  
+  DisplayMask:=$01;
+
+  DigitMasks[0]:=0;
+  DigitMasks[1]:=0;
+  DigitMasks[2]:=0;
+  DigitMasks[3]:=0;
+
+  SevenSegmentDisplayCount:=0;
+  FullColourLEDDisplayCount:=0;
+
+  RedLEDDrive:=$00;
+  GreenLEDDrive:=$00;
+  BlueLEDDrive:=$00;
+
+  I2C_Initialize($28,True);
+
+  INTCON:=$E0;
+end;
+
+var
+  PreviousMode:Byte;
+begin
+  Initialize;
+  
+  CounterValue:=$00;
+  
+  LightBallPhase:=0;
+
+  Interrupt_Mode:=-1;
+  PreviousMode:=Interrupt_Mode;
+  
+  while True do
+  begin
+    if I2C_Error<>0 then
+    begin
+      DigitMasks[0]:=$00;
+      DigitMasks[1]:=$00;
+      DigitMasks[2]:=$00;
+      DigitMasks[3]:=$00;
+
+      DigitMasks[0]:=I2C_Error;
+      I2C_Error:=0;
+      DelayMS(10000);
+
+      continue;
+    end;
+
+    // Synchronous update of Mode.
+    Mode:=Interrupt_Mode;
+    
+    case Mode of
+      -1:
+      begin
+        RedLEDDrive:=0;
+        GreenLEDDrive:=0;
+        BlueLEDDrive:=0;
+        ShowHappyFace;
+      end;
+      
+      1,5:
+      begin
+        DoVoltMeter;
+      end;
+
+      0,2,4,6:
+      begin
+        DoCounter;
+      end;
+      
+      3,7:
+      begin
+        if Mode<>PreviousMode then
+        begin
+          LightBallPhase:=0;
+          RedLEDDrive:=39;
+          GreenLEDDrive:=0;
+          BlueLEDDrive:=0;
+        end;
+
+        DoLightBall;
+      end;
+      
+      8:
+      begin
+        DisplayDecimalWord(CommandValue,-1,4);
+      end;
+
+      9:
+      begin
+        DisplayHexadecimalWord(CommandValue);
+      end;
+    end;
+
+    PreviousMode:=Mode;
+  end;
+end.

@@ -1,0 +1,222 @@
+program I2CMonitor;
+
+///////////////////////////////////////////////////////////////////////////////
+// To do:
+//
+// 1) Set speed to 115200 (or faster with MAX232 or -ve pulldown).
+// 2) If possible add TX during I2C sampling, else put sufficient wait or use a button (or RX from PC).
+///////////////////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////////////////
+// Using I2CMonitor:
+//
+// 1) Run I2CMonitor on a fast crystal.
+// 2) Run all other PICs on a 4 MHz crystal.
+// 3) Power up circuit and logon.
+// 4) Set PC.5 to 1. Reset I2CMonitor. Set PC.5 to 0. Set PC.5 to 1. This causes a broadcast to tell all devices to send slow I2C.
+// 5) Run I2CMonitor on PC (Delphi application). Keypad (and other) commands should cause I2C to be converted to serial out.
+//
+///////////////////////////////////////////////////////////////////////////////
+
+uses
+  UGeneral, UI2C;
+
+const
+  SlaveAddress=72;
+  TransmitBufferSize=64;
+
+var
+  TransmitBuffer:Array[0..TransmitBufferSize-1] of Byte;
+  TransmitWriteCount,TransmitWriteIndex,TransmitReadIndex,MandatoryByte:Byte;
+
+procedure interrupt;
+var
+  PortValue,OutputValue,I2CCommand,ReceivedData:Byte;
+begin
+  if PORTC.0 then
+  begin
+    if INTCON.RBIE and INTCON.RBIF then
+    begin
+      PortValue:=PORTB;
+      INTCON.RBIF:=0;
+
+      if TransmitWriteCount<TransmitBufferSize then
+      begin
+        OutputValue:=$30;
+        if PortValue.6 then
+          OutputValue.0:=1;
+        if PortValue.7 then
+          OutputValue.1:=1;
+
+        TransmitBuffer[TransmitWriteIndex]:=OutputValue;
+        Inc(TransmitWriteCount);
+        Inc(TransmitWriteIndex);
+        if TransmitWriteIndex=TransmitBufferSize then
+          TransmitWriteIndex:=0;
+      end
+      else
+      begin
+        PORTB.0:=1; // Buffer overflow.
+      end;
+    end;
+  end
+  else
+  begin
+    if PIE1.SSPIE and PIR1.SSPIF then
+    begin
+      if (SSPSTAT.D_A=0) then // Command.
+      begin
+        if SSPSTAT.R_W then
+        begin
+(*
+          case I2CCommand of
+          end;
+*)
+        end
+        else
+        begin
+          if SSPSTAT.BF then
+          begin
+if PORTB.2 then PORTB.2:=0 else PORTB.2:=1; // Test!!!
+            MandatoryByte:=SSPBUF; // Make sure this is not optimized out!
+            SSPSTAT.SSPOV:=False;
+
+            I2CCommand:=I2C_Slave_ReceiveByte;
+
+            case I2CCommand of
+              0:
+              begin
+                ReceivedData:=I2C_Slave_ReceiveByte;
+
+                if TransmitWriteCount<TransmitBufferSize then
+                begin
+                  TransmitBuffer[TransmitWriteIndex]:=ReceivedData;
+                  Inc(TransmitWriteCount);
+                  Inc(TransmitWriteIndex);
+                  if TransmitWriteIndex=TransmitBufferSize then
+                    TransmitWriteIndex:=0;
+                end;
+              end;
+
+              1:
+              begin
+                repeat
+                  ReceivedData:=I2C_Slave_ReceiveByte;
+
+                  if TransmitWriteCount<TransmitBufferSize then
+                  begin
+                    TransmitBuffer[TransmitWriteIndex]:=ReceivedData;
+                    Inc(TransmitWriteCount);
+                    Inc(TransmitWriteIndex);
+                    if TransmitWriteIndex=TransmitBufferSize then
+                      TransmitWriteIndex:=0;
+                  end;
+                until ReceivedData=0;
+              end;
+            end;
+          end;
+        end;
+      end;
+
+      PIR1.SSPIF:=False;
+    end;
+  end;
+end;
+
+procedure SendTransmitBuffer;
+var
+  Count:Byte;
+begin
+  for Count:=0 to TransmitBufferSize-1 do
+  begin
+    if TransmitWriteCount=0 then break;
+
+    repeat until PIR1.TXIF; // Wait for TX buffer empty.
+    TXREG:=TransmitBuffer[TransmitReadIndex]; // Automatically clears PIR1.TXIF.
+
+    Dec(TransmitWriteCount);
+    Inc(TransmitReadIndex);
+    if TransmitReadIndex=TransmitBufferSize then
+      TransmitReadIndex:=0;
+  end;
+end;
+
+begin
+  OPTION_REG:=$50; // Set weak PORTB pullups (Bit 7=0).
+
+  // Setup PA pins to digital.
+  ADCON0:=$00;
+  ADCON1:=$06;
+
+  TRISA:=$FF;
+
+  TRISB:=$FF;
+  TRISB.0:=0; // Buffer overflow LED.
+  TRISB.1:=0; // Test LED.
+  TRISB.2:=0; // Test LED.
+  TRISB.6:=1; // I2C SCL.
+  TRISB.7:=1; // I2C SDA.
+  PORTB:=$00;
+
+  TRISC:=$FF;
+  TRISC.6:=1; // RX
+  TRISC.7:=1; // TX
+
+  TransmitWriteCount:=0;
+  TransmitWriteIndex:=0;
+  TransmitReadIndex:=0;
+
+  // Test.
+  TransmitBuffer[TransmitWriteIndex]:=$40;
+  Inc(TransmitWriteIndex);
+  Inc(TransmitWriteCount);
+
+  I2C_Initialize(SlaveAddress,False,True);
+  
+  // Optionally broadcast to all I2C devices to use slow I2C (20000 kHz max).
+  if PORTC.5 then
+  begin
+    I2C_SetMasterMode;
+    
+    DelayMS(100);
+
+    // Wait for other chips to boot up before broadcasting.
+    repeat until PORTC.5=0;
+
+    I2C_Master_StartWrite($00);
+    I2C_Master_SendCommandWithByteParameter($FF,1); // Set debug I2C speed on all devices.
+    I2C_Master_Stop;
+
+// !!! Test
+I2C_Master_StartWrite($28);
+I2C_Master_SendCommandWithWordParameter($02,789);
+I2C_Master_Stop;
+  end;
+  
+  // PORTC.0 decides whether to copy I2C values to serial or to copy I2C signal wire events.
+  if PORTC.0=0 then
+    I2C_SetSlaveMode;
+
+  // Set up serial TX port.
+  SPBRG:=7; // Baud rate=14745600/(16(X+1). Speeds greater than 115200 require a pulldown resistor on TX to a negative supply.
+  TXSTA:=%00000110;
+  RCSTA:=%10000000;
+  PIE1.TXIE:=0;
+  TXSTA.TXEN:=1;
+
+  if PORTC.0=1 then
+    INTCON.3:=1; // Interrupt on PORTB bits 4 to 7 changed.
+
+  INTCON.PEIE:=1;
+  INTCON.GIE:=1;
+  
+  repeat
+    repeat until TransmitWriteCount<>0;
+//!!!
+//    Delay_MS(500); // Wait for buffer to be filled as software UART stops the interrupts.
+    SendTransmitBuffer;
+    Delay_MS(10); // Allow PC to receive and process block of data without flow control being required.
+
+    if PORTB.1=0 then PORTB.1:=1 else PORTB.1:=0;
+  until False;
+end.

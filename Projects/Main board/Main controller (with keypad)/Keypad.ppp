@@ -1,0 +1,49 @@
+[DeviceName]
+Value=P18F2620
+[DeviceClock]
+Value=40
+[MainUnit]
+Value=Keypad.ppas
+[DeviceFlags]
+Count=12
+Value0=_OSC_HSPLL_1H = $00F6
+Value1=_PWRT_ON_2L = $00FE
+Value2=_BORV_21_2L = $00FF
+Value3=_WDT_OFF_2H = $00FE
+Value4=_WDTPS_32768_2H = $00FF
+Value5=_MCLRE_OFF_3H = $007F
+Value6=_LPT1OSC_OFF_3H = $00FB
+Value7=_PBADEN_OFF_3H = $00FD
+Value8=_STVREN_ON_4L = $00FF
+Value9=_LVP_OFF_4L = $00FB
+Value10=_XINST_OFF_4L = $00BF
+Value11=_DEBUG_OFF_4L = $00FF
+Value12=_STVREN_ON_4L = $00FF
+Value13=_LVP_OFF_4L = $00FB
+Value14=_ICPRT_OFF_4L = $00DF
+Value15=_XINST_OFF_4L = $00BF
+Value16=_DEBUG_OFF_4L = $00FF
+[ProjectFiles]
+Count=0
+[OtherFiles]
+Count=1
+Value0=C:\PICs\Mikro Pascal\Keypad\Keypad.ppas
+Value1=C:\PICs\Mikro Pascal\Keypad\Keypad.ppas
+Value2=C:\PICs\Mikro Pascal\Keypad (18F2620)\Keypad.ppas
+Value3=C:\PICs\Mikro Pascal\Keypad\Keypad.asm
+Value4=C:\PICs\Mikro Pascal\Keypad\Keypad.ppas
+[TabIndex]
+Value=1
+[SearchPath]
+Count=6
+Value0=E:\Program Files\Mikroelektronika\mikroPascal\Defs\
+Value1=E:\Program Files\Mikroelektronika\mikroPascal\Uses\p18\
+Value2=C:\PICs\Mikro Pascal\Keypad\
+Value3=C:\PICs\Mikro Pascal\Keypad (18F2620)\
+Value4=C:\PICs\Mikro Pascal\Keypad (18F2550)\
+Value5=C:\PICs\Mikro Pascal\Library\
+[EEPROMinfo]
+isused=0
+[BuildSimDebug]
+Build=0
+SimDebug=0

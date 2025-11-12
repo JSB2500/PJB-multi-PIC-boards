@@ -1,0 +1,110 @@
+program SpeechController;
+
+// Pins:
+//
+// PORTA.5=1 for play mode and 0 for record mode.
+// PORTA.7=1 to start recording and 0 to stop recording.
+
+uses
+  UGeneral;
+
+var
+  EOF:Boolean;
+  
+procedure interrupt;
+begin
+  if INTCON.T0IF then
+  begin
+    EOF:=1;
+    INTCON.T0IF:=0;
+  end;
+end;
+
+procedure WaitForEndOfPlayingMessage;
+begin
+  // Wait for ~EOM or ~EOF to go active.
+  while (PORTA.6=1) and (EOF=0) do
+  begin
+  end;
+
+  if EOF=1 then Exit;
+
+  // Wait for EOM to go inactive.
+  // Don't wait for ~EOF because it won't go inactive until the chip is powered down.
+  while (PORTA.6=0) do
+  begin
+  end;
+end;
+
+procedure RecordMessage;
+begin
+  PORTB.2:=0; // PD.
+  DelayMS(50);
+
+  PORTB.1:=0; // Record.
+  PORTB.0:=0; // Chip enabled.
+  while PORTA.7=1 do
+  begin
+  end;
+  PORTB.0:=1; // Chip not enabled.
+  PORTB.1:=1; // Play.
+
+  DelayMS(50);
+  PORTB.2:=1; // PD.
+end;
+
+procedure PlayMessage;
+begin
+  EOF:=0;
+  TMR0:=255;
+
+  PORTB.2:=0; // PD.
+  DelayMS(50);
+
+  PORTB.1:=1; // Play.
+  PORTB.0:=0; // Chip enabled.
+  Delay_us(1);
+  PORTB.0:=1; // Chip not enabled.
+
+  WaitForEndOfPlayingMessage;
+
+  DelayMS(50);
+  PORTB.2:=1; // PD.
+end;
+
+var
+  PrevPortA5:Boolean;
+begin
+  CMCON:=$07; // Without this, reading PORTA fails (returns 0).
+  OPTION_REG:=$E8;
+  INTCON:=$A0;
+
+  TRISA:=$FF;
+
+  TRISB:=$F0;
+  PORTB:=$07;
+
+  PrevPortA5:=PORTA.5;
+
+  while True do
+  begin
+    // Record. Two pins are used to protect against an accidental switch change.
+    if (PORTA.7=1) and (PORTA.5=0) then
+    begin
+      PORTB.3:=1; // Busy.
+      RecordMessage;
+    end
+    // Play. Don't play when PORTA.5=0 because it is a nuisance having to wait for existing messages to complete playing during recording.
+    // Also play when mode is changed from record to play to aid checking of recorded messages.
+    else if ((PORTB.4=1) and (PORTA.5=1)) or ((PrevPortA5=0) and (PORTA.5=1)) then
+    begin
+      PORTB.3:=1; // Busy.
+      PlayMessage;
+      repeat until PORTB.4=0;
+    end;
+
+    PORTB.3:=0; // Busy.
+
+    PrevPortA5:=PORTA.5;
+  end;
+end.

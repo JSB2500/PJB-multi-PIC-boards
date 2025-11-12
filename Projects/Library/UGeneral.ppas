@@ -1,0 +1,62 @@
+unit UGeneral;
+
+procedure DelayOneMS;
+begin
+  Delay_ms(1);
+end;
+
+procedure DelayMS(Value:Word);
+// Code space efficient version of Delay_ms.
+var
+  Count:Word;
+begin
+  for Count:=0 to Value-1 do
+    DelayOneMS;
+end;
+
+procedure Delay;
+begin
+  DelayMS(500);
+end;
+
+procedure GlobalDisableInterrupts;
+// Fixes problem with INTCON.GIE getting reenabled by an interrupt that occurs during "INTCON.GIE:=False".
+begin
+  repeat
+    INTCON.GIE:=False;
+  until INTCON.GIE=False;
+end;
+
+function EEPROM_ReadByte(Address:Byte):Byte;
+begin
+  Result:=EEPROM_Read(Address);
+  DelayMS(20);
+end;
+
+procedure EEPROM_WriteByte(Address:Byte;Value:Byte);
+begin
+  EEPROM_Write(Address,Value);
+  DelayMS(20);
+end;
+
+function EEPROM_ReadWord(Address:Byte):Word;
+var
+  LowByte,HighByte:Byte;
+begin
+  LowByte:=EEPROM_Read(Address);
+  DelayMS(20);
+  HighByte:=EEPROM_Read(Address+1);
+  DelayMS(20);
+
+  Result:=LowByte+(HighByte shl 8);
+end;
+
+procedure EEPROM_WriteWord(Address:Byte;Value:Word);
+begin
+  EEPROM_Write(Address,Lo(Value));
+  DelayMS(20);
+  EEPROM_Write(Address+1,Hi(Value));
+  DelayMS(20);
+end;
+
+end.

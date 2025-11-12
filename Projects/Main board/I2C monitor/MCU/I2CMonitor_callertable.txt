@@ -1,0 +1,28 @@
+interrupt
+	I2C_Slave_ReceiveByte
+main
+	SendTransmitBuffer
+	I2C_SetSlaveMode
+	I2C_Master_SendCommandWithWordParameter
+		I2C_Master_SendByte
+	I2C_Master_Stop
+		I2C_SetSlaveMode
+	I2C_Master_SendCommandWithByteParameter
+		I2C_Master_SendByte
+	I2C_Master_StartWrite
+		I2C_Master_SendByte
+		Private_I2C_Master_AcquireBusAndStart
+			DelayMS
+				DelayOneMS
+			I2C_SetSlaveMode
+			Private_I2C_Master_Start
+			I2C_SetMasterMode
+				I2C_Init
+			I2C_Is_Idle
+		Private_I2C_Master_Restart
+	DelayMS
+		DelayOneMS
+	I2C_SetMasterMode
+		I2C_Init
+	I2C_Initialize
+		I2C_SetSlaveMode

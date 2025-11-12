@@ -1,0 +1,23 @@
+interrupt
+	SevenSegmentInterrupt
+	I2CInterrupt
+		Div_8x8_U
+		I2C_Slave_ReceiveByte
+main
+	____DoICP
+	Mul_16x16_U
+	table__DiceDots
+	SaveOptionsToEEPROM
+		EEPROM_WriteByte
+			DelayMS
+				DelayOneMS
+			EEprom_write
+	GlobalDisableInterrupts
+	I2C_Initialize
+		I2C_SetSlaveMode
+	LoadOptionsFromEEPROM
+		EEPROM_ReadByte
+			DelayMS
+				DelayOneMS
+			EEprom_read
+	SetDefaultOptions

@@ -1,0 +1,295 @@
+program SecondBoardController;
+
+uses
+  UGeneral, UI2C;
+
+const
+  SlaveAddress=20;
+  
+const
+  DiceDots:Array[1..6] of Array[0..4] of Byte=
+  (
+    ($00,$00,$08,$00,$00),
+    ($02,$00,$00,$00,$20),
+    ($02,$00,$08,$00,$20),
+    ($22,$00,$00,$00,$22),
+    ($22,$00,$08,$00,$22),
+    ($2A,$00,$00,$00,$2A)
+  );
+  
+var
+  I2CCommand:Byte; // Must be preserved between instructions to control data read from us.
+  MandatoryByte:Byte;
+  InterruptCount:Byte;
+  Interrupt_SetDiceValue:Byte;
+  Interrupt_ToggleRelay,Interrupt_ToggleDots,Interrupt_SetDefaultOptions,Interrupt_SaveOptionsToEEPROM:Boolean;
+  DisplayColumnIndex:Byte;
+  DisplayDots:Array[0..4] of Byte;
+  DigitMask:Byte;
+  
+procedure I2CInterrupt;
+var
+  DiceValue:Byte;
+begin
+  // Prevent SSPIF being handled inadvertently if PIE1.SSPIE=False and the interrupt handler is called by another
+  // source (e.g. a timer) when SSPIF=True as it often is during I2C master mode transactions.
+  if PIE1.SSPIE=False then Exit;
+
+  if PIR1.SSPIF then
+  begin
+    if (SSPSTAT.D_A=0) then // Command.
+    begin
+      if SSPSTAT.R_W then
+      begin
+(*
+        case I2CCommand of
+        end;
+*)
+      end
+      else
+      begin
+        if SSPSTAT.BF then
+        begin
+          MandatoryByte:=SSPBUF; // Make sure this is not optimized out!
+          SSPSTAT.SSPOV:=False;
+
+          I2CCommand:=I2C_Slave_ReceiveByte;
+
+          case I2CCommand of
+            0:
+            begin
+              DigitMask:=I2C_Slave_ReceiveByte;
+              Interrupt_SaveOptionsToEEPROM:=True;
+            end;
+
+            1:
+            begin
+              DisplayDots[0]:=I2C_Slave_ReceiveByte;
+              DisplayDots[1]:=I2C_Slave_ReceiveByte;
+              DisplayDots[2]:=I2C_Slave_ReceiveByte;
+              DisplayDots[3]:=I2C_Slave_ReceiveByte;
+              DisplayDots[4]:=I2C_Slave_ReceiveByte;
+              Interrupt_SaveOptionsToEEPROM:=True;
+            end;
+            
+            2:
+            begin
+              DiceValue:=I2C_Slave_ReceiveByte;
+              if (DiceValue>=1) and (DiceValue<=6) then
+              begin
+                Interrupt_SetDiceValue:=DiceValue;
+                Interrupt_SaveOptionsToEEPROM:=True;
+              end;
+            end;
+
+            3:
+            begin
+              Interrupt_SetDiceValue:=1+(InterruptCount mod 6);
+            end;
+
+            4:
+            begin
+              Interrupt_ToggleRelay:=True;
+              Interrupt_SaveOptionsToEEPROM:=True;
+            end;
+
+            5:
+            begin
+              Interrupt_ToggleDots:=True;
+              Interrupt_SaveOptionsToEEPROM:=True;
+            end;
+
+            999:
+            begin
+              Interrupt_SetDefaultOptions:=True;
+              Interrupt_SaveOptionsToEEPROM:=True;
+            end;
+          end;
+        end;
+      end;
+    end;
+
+    PIR1.SSPIF:=False;
+  end;
+end;
+
+procedure SevenSegmentInterrupt;
+begin
+  if INTCON.T0IE=False then Exit;
+
+  if INTCON.T0IF then
+  begin
+    // *** Seven segment displays ***
+
+    case DisplayColumnIndex of
+      0:
+      begin
+        PORTC:=$01;
+        PORTB:=not DisplayDots[0];
+      end;
+
+      1:
+      begin
+        PORTC:=$02;
+        PORTB:=not DisplayDots[1];
+      end;
+
+      2:
+      begin
+        PORTC:=$04;
+        PORTB:=not DisplayDots[2];
+      end;
+
+      3:
+      begin
+        PORTC:=$20;
+        PORTB:=not DisplayDots[3];
+      end;
+
+      4:
+      begin
+        PORTC:=$40;
+        PORTB:=not DisplayDots[4];
+      end
+
+      else
+      begin
+        PORTC:=$80;
+        PORTB:=not DigitMask;
+      end;
+    end;
+
+    Inc(DisplayColumnIndex);
+    if DisplayColumnIndex=8 then
+      DisplayColumnIndex:=0;
+
+    INTCON.T0IF:=False;
+  end;
+end;
+
+procedure interrupt;
+begin
+  I2CInterrupt;
+  SevenSegmentInterrupt;
+  Inc(InterruptCount);
+end;
+
+procedure SetDefaultOptions;
+begin
+  PORTA:=$00;
+
+  DisplayDots[0]:=$00;
+  DisplayDots[1]:=$00;
+  DisplayDots[2]:=$00;
+  DisplayDots[3]:=$00;
+  DisplayDots[4]:=$00;
+  DigitMask:=$00;
+end;
+
+procedure LoadOptionsFromEEPROM;
+begin
+  if EEPROM_ReadByte($00)=$FF then Exit; // Check options are valid.
+
+  PORTA:=EEPROM_ReadByte($01);
+  DigitMask:=EEPROM_ReadByte($02);
+  DisplayDots[0]:=EEPROM_ReadByte($03);
+  DisplayDots[1]:=EEPROM_ReadByte($04);
+  DisplayDots[2]:=EEPROM_ReadByte($05);
+  DisplayDots[3]:=EEPROM_ReadByte($06);
+  DisplayDots[4]:=EEPROM_ReadByte($07);
+end;
+
+procedure SaveOptionsToEEPROM;
+begin
+  EEPROM_WriteByte($00,$00); // $00=Options valid.
+  
+  EEPROM_WriteByte($01,PORTA);
+  EEPROM_WriteByte($02,DigitMask);
+  EEPROM_WriteByte($03,DisplayDots[0]);
+  EEPROM_WriteByte($04,DisplayDots[1]);
+  EEPROM_WriteByte($05,DisplayDots[2]);
+  EEPROM_WriteByte($06,DisplayDots[3]);
+  EEPROM_WriteByte($07,DisplayDots[4]);
+end;
+
+var
+  MainThread_SetDiceValue:Byte;
+  MainThread_ToggleRelay,MainThread_ToggleDots:Boolean;
+  MainThread_SetDefaultOptions,MainThread_SaveOptionsToEEPROM:Boolean;
+begin
+  OPTION_REG:=$D3; // Timer 0 prescaler.
+
+  // Setup PA pins to digital.
+  ADCON0:=$00;
+  ADCON1:=$06;
+
+  I2CCommand:=-1;
+  InterruptCount:=0;
+  Interrupt_SetDiceValue:=0;
+  Interrupt_ToggleRelay:=False;
+  Interrupt_ToggleDots:=False;
+  Interrupt_SetDefaultOptions:=False;
+  Interrupt_SaveOptionsToEEPROM:=False;
+  DisplayColumnIndex:=0;
+
+  SetDefaultOptions;
+  LoadOptionsFromEEPROM;
+
+  // Set these AFTER options are loaded to prevent transient output errors whilst options are loaded.
+  TRISA:=$DF;
+  TRISB:=$00;
+  TRISC:=$18;
+
+  I2C_Initialize(SlaveAddress,True);
+
+  INTCON:=$E0;
+  
+  repeat
+    // Exchange data with interrupt.
+    GlobalDisableInterrupts;
+    MainThread_SetDiceValue:=Interrupt_SetDiceValue;
+    Interrupt_SetDiceValue:=0;
+    MainThread_ToggleRelay:=Interrupt_ToggleRelay;
+    Interrupt_ToggleRelay:=False;
+    MainThread_ToggleDots:=Interrupt_ToggleDots;
+    Interrupt_ToggleDots:=False;
+    MainThread_SetDefaultOptions:=Interrupt_SetDefaultOptions;
+    Interrupt_SetDefaultOptions:=False;
+    MainThread_SaveOptionsToEEPROM:=Interrupt_SaveOptionsToEEPROM;
+    Interrupt_SaveOptionsToEEPROM:=False;
+    INTCON.GIE:=True;
+
+    if MainThread_SetDefaultOptions then
+      SetDefaultOptions;
+
+    if MainThread_SetDiceValue<>0 then
+    begin
+      // Using DisplayDots:=DiceDots[MainThread_SetDiceValue] DOES NOT WORK!
+      DisplayDots[0]:=DiceDots[MainThread_SetDiceValue][0];
+      DisplayDots[1]:=DiceDots[MainThread_SetDiceValue][1];
+      DisplayDots[2]:=DiceDots[MainThread_SetDiceValue][2];
+      DisplayDots[3]:=DiceDots[MainThread_SetDiceValue][3];
+      DisplayDots[4]:=DiceDots[MainThread_SetDiceValue][4];
+    end;
+    
+    if MainThread_ToggleRelay then
+    begin
+      if PORTA.5 then
+        PORTA.5:=0
+      else
+        PORTA.5:=1;
+    end;
+
+    if MainThread_ToggleDots then
+    begin
+      DisplayDots[0]:=not DisplayDots[0];
+      DisplayDots[1]:=not DisplayDots[1];
+      DisplayDots[2]:=not DisplayDots[2];
+      DisplayDots[3]:=not DisplayDots[3];
+      DisplayDots[4]:=not DisplayDots[4];
+    end;
+    
+    if MainThread_SaveOptionsToEEPROM then
+      SaveOptionsToEEPROM;
+  until False;
+end.

@@ -1,0 +1,31 @@
+[DeviceName]
+Value=P16F627
+[DeviceClock]
+Value=4
+[MainUnit]
+Value=SpeechController.ppas
+[DeviceFlags]
+Count=5
+Value0=_PWRTE_ON = $3FF7
+Value1=_WDT_OFF = $3FFB
+Value2=_LVP_OFF = $3F7F
+Value3=_MCLRE_OFF = $3FDF
+Value4=_INTRC_OSC_NOCLKOUT = $3FFC
+[ProjectFiles]
+Count=0
+[OtherFiles]
+Count=1
+Value0=C:\PICs\Mikro Pascal\Speech Controller\SpeechController.ppas
+Value1=C:\PICs\Mikro Pascal\Seven segment displays\SevenSegmentDisplays.ppas
+Value2=C:\PICs\Mikro Pascal\Library\USevenSegmentDisplays.ppas
+[TabIndex]
+Value=0
+[SearchPath]
+Count=5
+Value0=E:\Program Files\Mikroelektronika\mikroPascal\Defs\
+Value1=E:\Program Files\Mikroelektronika\mikroPascal\Uses\p16\
+Value2=C:\PICs\Mikro Pascal\Speech controller\
+Value3=C:\PICs\Mikro Pascal\Keypad\
+Value4=C:\PICs\Mikro Pascal\Library\
+[EEPROMinfo]
+isused=0

@@ -1,0 +1,294 @@
+unit UI2C;
+
+///////////////////////////////////////////////////////////////////////////////
+// Interrupts!
+//
+// 1) SUBTLE! If you disable interrupts from a given source using a mask (e.g. SSPIE or BCLIE) be aware that if ANOTHER source
+//    (e.g. a timer) causes an interrupt and say SSPIF is set, even though SSPIF did not cause the interrupt handler routine
+//    to be called, your SSPIF interrupt handler routine will get executed, probably wrecking the I2C data transfer. To fix this
+//    check the mask (e.g. SSPIE and BCLIE) in the interrupt handler. You should not clear the interrupt flag (e.g. SSPIF or BCLIF)
+//    in the interrupt handler if the mask flag (e.g. SSPIE and BCLIE) has not enabled the interrupt because the interrupt flag
+//    may be used by polling code.
+//
+///////////////////////////////////////////////////////////////////////////////
+
+uses
+  UGeneral;
+
+(*
+// JSB: Compiler bug: This doesn't work. If P16F is set in the first test, it gets undefined by the second.
+{$IFDEF P16F872}{$DEFINE P16F}{$ENDIF}
+{$IFDEF P16F876}{$DEFINE P16F}{$ENDIF}
+*)
+
+// See "<OpSysDrive>:\Program Files\Mikroelektronika\mikroPascal\defs".
+{$IFDEF P16F872}
+var
+	SSPCON1:byte; absolute 0x0014; register;
+{$ENDIF}
+
+{$IFDEF P16F876}
+var
+	SSPCON1:byte; absolute 0x0014; register;
+{$ENDIF}
+
+const
+  I2C_WriteError=1;
+  I2C_AckError=2;
+  
+var
+  I2C_Initialized:Boolean;
+  I2C_MasterMode_SSPCON1:Byte;
+  I2C_MasterMode_SSPADD:Byte;
+  I2C_SlaveAddress:Byte;
+  I2C_MultiMasterMode:Boolean;
+  I2C_Error:Byte;
+  I2C_Started:Boolean;
+
+///////////////////////////////////////////////////////////////////////////////
+
+// Note: Using build in I2C routines causes hanging in I2C_Start and I2C_Stop (with 7 seg as master).
+
+procedure I2C_SetSlaveMode;
+begin
+  SSPCON1.SSPEN:=False; // Reset I2C module.
+  SSPADD:=I2C_SlaveAddress;
+  SSPCON1:=$36; // I2C slave mode.
+  SSPCON2.GCEN:=True; // General call.
+
+  PIR1.SSPIF:=False;
+  PIE1.SSPIE:=True;
+
+  PIE2.BCLIE:=False;
+end;
+
+procedure I2C_SetMasterMode;
+begin
+  PIE1.SSPIE:=False; // Prevent our I2C interrupt handler from operating whilst we are master.
+  PIE2.BCLIE:=False; // Prevent our I2C interrupt handler from operating whilst we are master.
+
+  SSPCON1.SSPEN:=False; // Reset I2C module.
+
+  if not I2C_Initialized then
+  begin
+    I2C_Init(100000); // Sets SSPCON1 according to specified speed and currently selected clock speed. HOWEVER it also pulls SCL and SDA low momenterally which causes problems with the ISD5116 speech chip if used in MultiMaster mode.
+    I2C_MasterMode_SSPADD:=SSPADD;
+    I2C_MasterMode_SSPCON1:=SSPCON1;
+  end
+  else
+  begin
+    // Do this manually rather than calling I2C_Init to avoid pulling SCL and SDA low momenterally (which causes problems with the ISD5116 speech chip).
+    // This happens when using the P18F2550 but not with the P16F876.
+    SSPADD:=I2C_MasterMode_SSPADD;
+    SSPCON1:=I2C_MasterMode_SSPCON1;
+  end;
+end;
+
+procedure I2C_Initialize(SlaveAddress:Byte;MultiMasterMode:Boolean);
+// LSB of SlaveAddress must be 0.
+begin
+  I2C_Initialized:=False;
+  I2C_Started:=False;
+  I2C_Error:=0;
+  I2C_MultiMasterMode:=MultiMasterMode;
+  I2C_SlaveAddress:=SlaveAddress;
+  I2C_SetMasterMode; // Call even in MultiMasterMode to setup the port pins.
+  if MultiMasterMode then
+    I2C_SetSlaveMode;
+  I2C_Initialized:=True;
+end;
+
+///////////////////////////////////////////////////////////////////////////////
+// Basic I2C routines. Start does support multimastering. Smaller than MikroPscal equivalent.
+
+function Private_I2C_Master_Start:Boolean;
+// Returns True if succeeds. This is the opposite to I2C_Start.
+begin
+  Result:=False;
+  
+  PIR1.SSPIF:=False;
+  PIR2.BCLIF:=False; // Bus collision detect.
+  SSPCON2.SEN:=True;
+  while PIR1.SSPIF=False do
+  begin
+    if PIR2.BCLIF then
+    begin
+      PIR2.BCLIF:=False;
+      Exit;
+    end;
+  end;
+
+  PIR1.SSPIF:=False;
+  
+  Result:=True;
+end;
+
+procedure Private_I2C_Master_Restart;
+begin
+  SSPCON2.RSEN:=True;
+  while PIR1.SSPIF=False do begin end;
+  PIR1.SSPIF:=False;
+end;
+
+procedure Private_I2C_Master_AcquireBusAndStart;
+// Supports multi-master I2C.
+// Once we have become a master and before we get the bus we may miss a call so switch back to slave mode and wait for them to finish.
+// Don't just wait for the bus because they might be trying to talk to us and we might be trying to talk to them.
+// This could cause a deadlock as we will both always fail.
+begin
+  I2C_Started:=False;
+
+  if I2C_MultiMasterMode then
+  begin
+    while True do
+    begin
+      if I2C_Is_Idle then
+      begin
+        I2C_SetMasterMode;
+        if Private_I2C_Master_Start then
+        begin
+          I2C_Started:=True;
+          Exit; // Success.
+        end;
+        I2C_SetSlaveMode;
+      end;
+
+      DelayMS(10); // Arbitrary but longer than the longest time to handle an instruction. A random time would be better.
+    end;
+  end
+  else
+  begin
+    repeat until Private_I2C_Master_Start;
+    I2C_Started:=True;
+  end;
+end;
+
+procedure I2C_Master_SendByte(Value:Byte);
+begin
+  SSPBUF:=Value;
+  if SSPCON1.WCOL then
+  begin
+    I2C_Error:=I2C_WriteError;
+    SSPCON1.WCOL:=False;
+  end;
+  while PIR1.SSPIF=False do begin end;
+  PIR1.SSPIF:=False;
+  if SSPCON2.ACKSTAT then
+  begin
+    I2C_Error:=I2C_AckError;
+  end;
+end;
+
+procedure I2C_Master_SendWord(Parameter:Word);
+begin
+  I2C_Master_SendByte(Lo(Parameter));
+  I2C_Master_SendByte(Hi(Parameter));
+end;
+
+procedure I2C_Master_StartWrite(DeviceAddress:Byte);
+begin
+  if I2C_Started then
+    Private_I2C_Master_Restart
+  else
+    Private_I2C_Master_AcquireBusAndStart;
+
+  I2C_Master_SendByte(DeviceAddress);
+end;
+
+procedure I2C_Master_StartRead(DeviceAddress:Byte);
+begin
+  if I2C_Started then
+    Private_I2C_Master_Restart
+  else
+    Private_I2C_Master_AcquireBusAndStart;
+
+  I2C_Master_SendByte(DeviceAddress or 1);
+end;
+
+procedure I2C_Master_Stop;
+begin
+  I2C_Started:=False;
+
+  SSPCON2.PEN:=True;
+  while PIR1.SSPIF=False do begin end;
+  PIR1.SSPIF:=False;
+
+  if I2C_MultiMasterMode then
+    I2C_SetSlaveMode;
+end;
+
+procedure I2C_Master_SendCommandWithByteParameter(Command,Parameter:Byte);
+begin
+  I2C_Master_SendByte(Command);
+  I2C_Master_SendByte(Parameter);
+end;
+
+procedure I2C_Master_SendCommandWithWordParameter(Command:Byte;Parameter:Word);
+begin
+  I2C_Master_SendByte(Command);
+  I2C_Master_SendByte(Lo(Parameter));
+  I2C_Master_SendByte(Hi(Parameter));
+end;
+
+function I2C_Master_ReceiveByte(LastRead:Boolean):Byte;
+begin
+  SSPCON2.RCEN:=True;
+  while PIR1.SSPIF=False do begin end;
+  PIR1.SSPIF:=False;
+  Result:=SSPBUF;
+  if LastRead then
+    SSPCON2.ACKDT:=1 // Not acknowledge.
+  else
+    SSPCON2.ACKDT:=0; // Acknowledge.
+  SSPCON2.ACKEN:=True;
+  while PIR1.SSPIF=False do begin end;
+  PIR1.SSPIF:=False;
+end;
+
+function I2C_Master_ReceiveWord(LastRead:Boolean):Word;
+var
+  LowByte,HighByte:Byte;
+begin
+  LowByte:=I2C_Master_ReceiveByte(0);
+  HighByte:=I2C_Master_ReceiveByte(LastRead);
+
+  Result:=LowByte+(HighByte shl 8);
+end;
+
+///////////////////////////////////////////////////////////////////////////////
+
+function I2C_Slave_ReceiveByte:Byte;
+begin
+  PIR1.SSPIF:=False;
+  while (PIR1.SSPIF=0) or (SSPSTAT.BF=0) do begin end;
+  Result:=SSPBUF;
+  SSPSTAT.SSPOV:=False;
+  PIR1.SSPIF:=False;
+end;
+
+function I2C_Slave_ReceiveWord:Word;
+var
+  LowByte,HighByte:Byte;
+begin
+  LowByte:=I2C_Slave_ReceiveByte;
+  HighByte:=I2C_Slave_ReceiveByte;
+  Result:=LowByte+(HighByte shl 8);
+end;
+
+procedure I2C_Slave_SendByte(Value:Byte);
+begin
+  while (PIR1.SSPIF=0) do begin end;
+  SSPBUF:=Value;
+  SSPCON1.CKP:=True;
+  PIR1.SSPIF:=False;
+end;
+
+procedure I2C_Slave_SendWord(Value:Word);
+begin
+  I2C_Slave_SendByte(Lo(Value));
+  I2C_Slave_SendByte(Hi(Value));
+end;
+
+///////////////////////////////////////////////////////////////////////////////
+
+end.

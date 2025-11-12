@@ -1,0 +1,33 @@
+[DeviceName]
+Value=P16F876A
+[DeviceClock]
+Value=14.7456
+[MainUnit]
+Value=I2CMonitor.ppas
+[DeviceFlags]
+Count=4
+Value0=_LVP_OFF = $3F7F
+Value1=_PWRTE_ON = $3FF7
+Value2=_WDT_OFF = $3FFB
+Value3=_HS_OSC = $3FFE
+Value4=_HS_OSC = $3FEE
+[ProjectFiles]
+Count=0
+[OtherFiles]
+Count=3
+Value0=C:\PICs\Mikro Pascal\I2C monitor\I2CMonitor.ppas
+Value1=C:\PICs\Mikro Pascal\Library\UI2C.ppas
+Value2=E:\Program Files\Mikroelektronika\mikroPascal\Defs\p16f876a.ppas
+Value3=C:\PICs\Mikro Pascal\I2C\I2C.ppas
+[TabIndex]
+Value=0
+[SearchPath]
+Count=6
+Value0=E:\Program Files\Mikroelektronika\mikroPascal\Defs\
+Value1=C:\PICs\Mikro Pascal\I2C monitor\
+Value2=E:\Program Files\Mikroelektronika\mikroPascal\Uses\p16\
+Value3=C:\PICs\Mikro Pascal\I2C\
+Value4=C:\PICs\Mikro Pascal\BidirectionalLEDFlasher\
+Value5=C:\PICs\Mikro Pascal\Library\
+[EEPROMinfo]
+isused=0

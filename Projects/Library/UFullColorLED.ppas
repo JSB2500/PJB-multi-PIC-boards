@@ -1,0 +1,37 @@
+unit FullColorLED;
+
+var
+  RedLEDDrive,GreenLEDDrive,BlueLEDDrive:Byte;
+  DisplayCount:Byte;
+  
+procedure InitializeFullColorLED;
+begin
+  OPTION_REG:=$D2; // Timer 0 prescaler.
+
+  TRISB:=$00;
+  PORTB:=$00;
+
+  DisplayCount:=$00;
+  
+  RedLEDDrive:=$00;
+  GreenLEDDrive:=$00;
+  BlueLEDDrive:=$00;
+
+  INTCON:=$A0;
+end;
+
+procedure interrupt;
+begin
+  if INTCON.T0IF then
+  begin
+    PORTB.0:=(DisplayCount>RedLEDDrive);
+    PORTB.1:=(DisplayCount>GreenLEDDrive);
+    PORTB.2:=(DisplayCount>BlueLEDDrive);
+    
+    Inc(DisplayCount);
+
+    INTCON.T0IF:=0;
+  end;
+end;
+
+end.

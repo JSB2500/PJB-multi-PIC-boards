@@ -1,0 +1,27 @@
+program BidirectionalLEDFlasher;
+uses
+  UGeneral;
+  
+begin
+  TRISA:=$FF;
+  TRISB:=$00;
+
+  while True do
+  begin
+    PORTB.0:=0;
+    PORTB.1:=1;
+
+    if PORTA.0=0 then
+      DelayMS(500)
+    else
+      DelayMS(1);
+
+    PORTB.0:=1;
+    PORTB.1:=0;
+
+    if PORTA.0=0 then
+      DelayMS(500)
+    else
+      DelayMS(1);
+  end;
+end.

@@ -1,0 +1,9 @@
+interrupt
+main
+	PlayMessage
+		WaitForEndOfPlayingMessage
+		DelayMS
+			DelayOneMS
+	RecordMessage
+		DelayMS
+			DelayOneMS
